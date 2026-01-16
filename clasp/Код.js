@@ -8,6 +8,7 @@ const SHEET_CONST = 'CONST';
 const SHEET_RESIDENTS = 'RESIDENTS';
 const SHEET_ACCOUNTS = 'ACCOUNTS';
 const SHEET_ADDRESS_TRANSACTIONS = 'ADDRESS_TRANSACTIONS';
+const SHEET_BALANCE_CHANGES = 'BALANCE_CHANGES';
 
 const MEMO_CACHE_TTL = 21600; // 6 часов
 const MAX_MEMO_FETCH_PER_RUN = 300;
@@ -53,12 +54,21 @@ function syncStellarTransfers() {
   const resSheet = ss.getSheetByName(SHEET_RESIDENTS);
   const accSheet = ss.getSheetByName(SHEET_ACCOUNTS);
   const transfersSheet = ss.getSheetByName(SHEET_TRANSFERS) || ss.insertSheet(SHEET_TRANSFERS);
+  const balanceChangesSheet = ss.getSheetByName(SHEET_BALANCE_CHANGES) || ss.insertSheet(SHEET_BALANCE_CHANGES);
 
   // Создаем заголовки, если лист пуст
   if (transfersSheet.getLastRow() === 0) {
     transfersSheet.appendRow(['section', 'datetime', 'from', 'from_label', 'to', 'to_label', 'asset', 'amount', 'memo', 'tx_hash']);
     transfersSheet.getRange('H:H').setNumberFormat('0,########'); // Формат для Amount
     transfersSheet.getRange('B:B').setNumberFormat('dd-mm-yyyy hh:mm:ss'); // Формат для Datetime
+  }
+
+  // Создаем заголовки, если лист BALANCE_CHANGES пуст
+  if (balanceChangesSheet.getLastRow() === 0) {
+    balanceChangesSheet.appendRow(['fund_account', 'asset', 'change_amount', 'new_balance', 'tx_hash', 'datetime']);
+    balanceChangesSheet.getRange('C:C').setNumberFormat('0,########'); // Формат для change_amount
+    balanceChangesSheet.getRange('D:D').setNumberFormat('0,########'); // Формат для new_balance
+    balanceChangesSheet.getRange('F:F').setNumberFormat('dd-mm-yyyy hh:mm:ss'); // Формат для datetime
   }
 
   const config = parseConstSheet(constSheet);
@@ -75,6 +85,7 @@ function syncStellarTransfers() {
 
   const allRows = [];
   const allNewMemoHashes = [];
+  const allBalanceChangeRows = [];
 
   for (const fundKey in fundAccounts) {
     const fundAddress = fundAccounts[fundKey];
@@ -167,6 +178,19 @@ function syncStellarTransfers() {
 
       const assetCode = rec.asset_code || rec.asset_type;
       const amount = amountFloat;
+      const assetIssuer = rec.asset_issuer || '';
+      const assetKey = `${assetCode}:${assetIssuer}`;
+      const changeAmount = section === 'IN' ? amount : -amount;
+      const newBalance = '';
+
+      allBalanceChangeRows.push([
+        fundAddress,
+        assetKey,
+        changeAmount,
+        newBalance,
+        txHash,
+        dt
+      ]);
 
       // 1. Попытка получить memo из кэша
       const cachedMemo = cache.get(`memo:${txHash}`);
@@ -256,6 +280,12 @@ function syncStellarTransfers() {
     if (hashesToWrite.length > 0) {
       memoSheet.getRange(memoSheet.getLastRow() + 1, 1, hashesToWrite.length, 1).setValues(hashesToWrite.map(h => [h]));
     }
+  }
+
+  // Запись всех строк в BALANCE_CHANGES
+  if (allBalanceChangeRows.length > 0) {
+    const startRow = balanceChangesSheet.getLastRow() + 1;
+    balanceChangesSheet.getRange(startRow, 1, allBalanceChangeRows.length, 6).setValues(allBalanceChangeRows);
   }
 }
 

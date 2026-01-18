@@ -1,5 +1,6 @@
 const DEBUG = true;
 const DEBUG_LEVEL = 2;
+const DEFAULT_HORIZON_URL = 'https://archive.stellar.validationcloud.io/v1/H4KC7iRdHf-G0jIblbqY8JKfzSb4Aiq_I97id7yrdzY';
 
 const SHEET_TRANSFERS = 'TRANSFERS';
 const SHEET_MEMO_QUEUE = 'TRANSFERS_MEMO_QUEUE';
@@ -76,9 +77,11 @@ function syncStellarTransfers() {
   const accountsLabelMap = parseAccountsSheet(accSheet);
   const bsnLabelMap = fetchBSNLabels();
   const fundAccounts = config.fundAccounts;
-  const horizon = config.HORIZON_URL;
+  const horizon = config.HORIZON_URL || DEFAULT_HORIZON_URL;
   const startDate = config.START_DATE ? new Date(`${config.START_DATE}T00:00:00Z`) : null;
   const endDate = config.END_DATE ? new Date(`${config.END_DATE}T23:59:59Z`) : null;
+  const tokenFilterInfo = parseTokenFilter(config.TOKEN_FILTER || '');
+  const relaxRoleFilter = String(config.RELAX_ROLE_FILTER || '').trim().toUpperCase() === 'TRUE' || String(config.RELAX_ROLE_FILTER || '').trim() === '1';
 
   const props = PropertiesService.getUserProperties();
   const cache = CacheService.getScriptCache();
@@ -91,24 +94,32 @@ function syncStellarTransfers() {
     const fundAddress = fundAccounts[fundKey];
     const cursorKey = `cursor_payments_${fundKey}`;
     const cursor = props.getProperty(cursorKey);
-    const log = {
-      timestamp: new Date().toISOString(),
-      stage: 'syncStellarTransfers',
-      fundKey,
-      address: fundAddress,
-      cursor: cursor || 'START',
-      fetched: 0,
-      typeOk: 0,
-      nonNative: 0,
-      inDate: 0,
-      minAmountOk: 0,
-      roleOk: 0,
-      uniqueTx: 0,
-      rowsPrepared: 0,
-      rowsWritten: 0,
-      memoCacheHit: 0,
-      memoFetched: 0,
-      memoQueued: 0,
+      const log = {
+        timestamp: new Date().toISOString(),
+        stage: 'syncStellarTransfers',
+        fundKey,
+        address: fundAddress,
+        cursor: cursor || 'START',
+        fetched: 0,
+        dropType: 0,
+        typeOk: 0,
+        dropNonNative: 0,
+        nonNative: 0,
+        dropInDate: 0,
+        inDate: 0,
+        dropMinAmount: 0,
+        minAmountOk: 0,
+        dropRole: 0,
+        roleOk: 0,
+        dropDuplicate: 0,
+        dropNoTxHash: 0,
+        uniqueTx: 0,
+        dropTokenFilter: 0,
+        rowsPrepared: 0,
+        rowsWritten: 0,
+        memoCacheHit: 0,
+        memoFetched: 0,
+        memoQueued: 0,
     };
 
     const url = `${horizon}/accounts/${fundAddress}/payments?order=asc&limit=200${cursor ? `&cursor=${cursor}` : ''}`;
@@ -123,19 +134,22 @@ function syncStellarTransfers() {
       newCursor = rec.paging_token; // Обновляем курсор на каждой записи
 
       if (!['payment', 'path_payment_strict_send', 'path_payment_strict_receive'].includes(rec.type)) {
+        log.dropType++;
         if (DEBUG && DEBUG_LEVEL >= 2) Logger.log(`[${fundKey}] Пропущен по типу: ${rec.type}`);
         continue;
       }
       log.typeOk++;
 
       if (rec.asset_type === 'native') {
-        if (DEBUG && DEBUG_LEVEL >= 2) Logger.log(`[${fundKey}] Пропущен native asset: ${rec.asset_type}`);
+        log.dropNonNative++;
+        if (DEBUG && DEBUG_LEVEL >= 2) Logger.log(`[${fundKey}] Пропущен native (XLM): ${rec.transaction_hash}`);
         continue;
       }
       log.nonNative++;
 
       const dt = new Date(rec.created_at);
       if ((startDate && dt < startDate) || (endDate && dt > endDate)) {
+        log.dropInDate++;
         if (DEBUG && DEBUG_LEVEL >= 2) Logger.log(`[${fundKey}] Пропущен по дате: ${rec.created_at}`);
         // Если order=asc и мы вышли за END_DATE, можно прекращать чтение
         if (endDate && dt > endDate) break;
@@ -145,6 +159,7 @@ function syncStellarTransfers() {
 
       const amountFloat = parseFloat(rec.amount);
       if (amountFloat < 0.01) {
+        log.dropMinAmount++;
         if (DEBUG && DEBUG_LEVEL >= 2) Logger.log(`[${fundKey}] Пропущен по сумме: ${rec.amount}`);
         continue;
       }
@@ -165,21 +180,58 @@ function syncStellarTransfers() {
       let section = '';
       if (fromIsRes && toIsFund) section = 'IN';
       else if (fromIsFund && toIsRes) section = 'OUT';
-      else {
+      else if (relaxRoleFilter && (fromIsFund || toIsFund)) {
+        section = toIsFund ? 'IN' : 'OUT';
+        if (DEBUG && DEBUG_LEVEL >= 1) {
+          Logger.log(`[${fundKey}] Ослабленный roleOk: from=${from}, to=${to}, section=${section}`);
+        }
+      } else {
+        log.dropRole++;
         if (DEBUG && DEBUG_LEVEL >= 2) Logger.log(`[${fundKey}] Пропущен по ролям: from=${from}, to=${to}`);
         continue;
       }
       log.roleOk++;
 
       const txHash = rec.transaction_hash;
-      if (!txHash || txHashes.has(txHash)) continue;
-      txHashes.add(txHash);
+      const opId = rec.id || rec.paging_token || '';
+      const uniqueKey = `${txHash || ''}:${opId}`;
+      if (!txHash) {
+        log.dropNoTxHash++;
+        if (DEBUG && DEBUG_LEVEL >= 2) Logger.log(`[${fundKey}] Пропущен без tx_hash: opId=${opId}`);
+        continue;
+      }
+      if (txHashes.has(uniqueKey)) {
+        log.dropDuplicate++;
+        if (DEBUG && DEBUG_LEVEL >= 2) Logger.log(`[${fundKey}] Дубликат uniqueKey=${uniqueKey}`);
+        continue;
+      }
+      txHashes.add(uniqueKey);
       log.uniqueTx++;
 
       const assetCode = rec.asset_code || rec.asset_type;
       const amount = amountFloat;
       const assetIssuer = rec.asset_issuer || '';
       const assetKey = `${assetCode}:${assetIssuer}`;
+      const assetCodeNorm = normalizeTokenPart(assetCode);
+      const assetIssuerNorm = normalizeTokenPart(assetIssuer);
+      const assetKeyNorm = `${assetCodeNorm}:${assetIssuerNorm}`;
+      if (tokenFilterInfo.norm) {
+        const tokenMatch = tokenFilterInfo.hasIssuer
+          ? (assetCodeNorm === tokenFilterInfo.code && assetIssuerNorm === tokenFilterInfo.issuer)
+          : assetCodeNorm === tokenFilterInfo.code;
+        if (DEBUG && DEBUG_LEVEL >= 2) {
+          Logger.log(
+            `[${fundKey}] TokenFilter check: tokenFilterRaw=${tokenFilterInfo.raw}, tokenFilterNorm=${tokenFilterInfo.norm}, ` +
+            `assetKey=${assetKey}, assetKeyNorm=${assetKeyNorm}, assetCode=${assetCode}, assetIssuer=${assetIssuer}, ` +
+            `match=${tokenMatch}, mode=${tokenFilterInfo.hasIssuer ? 'CODE:ISSUER' : 'CODE'}`
+          );
+        }
+        if (!tokenMatch) {
+          log.dropTokenFilter++;
+          if (DEBUG && DEBUG_LEVEL >= 2) Logger.log(`[${fundKey}] Пропущен по tokenFilter: ${assetKey}`);
+          continue;
+        }
+      }
       const changeAmount = section === 'IN' ? amount : -amount;
       const newBalance = '';
 
@@ -227,6 +279,25 @@ function syncStellarTransfers() {
     props.setProperty(cursorKey, newCursor);
 
     // Запись лога. Если rowsWritten == 0, лог должен явно вывести главную причину
+    const dropStats = {
+      type: log.dropType,
+      nonNative: log.dropNonNative,
+      inDate: log.dropInDate,
+      minAmount: log.dropMinAmount,
+      roleOk: log.dropRole,
+      uniqueTx: log.dropDuplicate,
+      tokenFilter: log.dropTokenFilter,
+      noTxHash: log.dropNoTxHash
+    };
+    let topDropKey = '';
+    let topDropVal = -1;
+    for (const k in dropStats) {
+      if (dropStats[k] > topDropVal) {
+        topDropVal = dropStats[k];
+        topDropKey = k;
+      }
+    }
+
     if (log.rowsPrepared === 0 && log.fetched > 0) {
       if (log.roleOk === 0) log.details = 'Главная причина: roleOk (фонд↔резидент) = 0';
       else if (log.minAmountOk === 0) log.details = 'Главная причина: minAmountOk (<0.01) = 0';
@@ -234,7 +305,7 @@ function syncStellarTransfers() {
       else if (log.nonNative === 0) log.details = 'Главная причина: nonNative (XLM) = 0';
       else log.details = 'Неизвестная причина обнуления выборки.';
     } else if (log.rowsPrepared > 0) {
-      log.details = `Успешно подготовлено ${log.rowsPrepared} строк.`;
+      log.details = `Успешно подготовлено ${log.rowsPrepared} строк. Топ-фильтр: ${topDropKey}=${topDropVal}`;
     } else if (log.fetched === 0) {
       log.details = `Не получено ни одной записи из Horizon. Проверьте адрес фонда ${fundAddress} и HORIZON_URL.`;
     }
@@ -379,13 +450,14 @@ function parseConstSheet(sheet) {
     if (key === 'HORIZON_URL') config.HORIZON_URL = strVal;
     else if (key === 'START_DATE') config.START_DATE = strVal;
     else if (key === 'END_DATE') config.END_DATE = strVal;
+    else if (key === 'TOKEN_FILTER') config.TOKEN_FILTER = strVal;
     else if (strVal && strVal.startsWith('G')) {
       config.fundAccounts[key] = strVal;
       fundCount++;
     }
   }
   if (DEBUG) {
-    Logger.log(`[parseConstSheet] fundAccounts=${fundCount}, hasHorizon=${!!config.HORIZON_URL}, startDate=${config.START_DATE || 'NONE'}, endDate=${config.END_DATE || 'NONE'}`);
+    Logger.log(`[parseConstSheet] fundAccounts=${fundCount}, hasHorizon=${!!config.HORIZON_URL}, startDate=${config.START_DATE || 'NONE'}, endDate=${config.END_DATE || 'NONE'}, tokenFilter=${config.TOKEN_FILTER || 'NONE'}`);
   }
   return config;
 }
@@ -482,6 +554,27 @@ function isFund(addr, fundAccounts) {
 
 function isResident(addr, residentsMap) {
   return String(addr).trim() in residentsMap;
+}
+
+function normalizeTokenPart(value) {
+  return String(value || '').trim().toUpperCase();
+}
+
+function parseTokenFilter(rawValue) {
+  const raw = String(rawValue || '').trim();
+  if (!raw) return { raw: '', norm: '', code: '', issuer: '', hasIssuer: false };
+  const normalized = raw.replace(/\s+/g, '').toUpperCase();
+  const normalizedSep = normalized.replace(/[\/|]/g, ':');
+  const parts = normalizedSep.split(':').filter(Boolean);
+  const code = parts[0] || '';
+  const issuer = parts[1] || '';
+  return {
+    raw,
+    norm: normalizedSep,
+    code,
+    issuer,
+    hasIssuer: Boolean(issuer)
+  };
 }
 
 function fetchAllPayments(baseUrl, fundKey, endDate, log) {

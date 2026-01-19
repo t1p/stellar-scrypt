@@ -934,7 +934,7 @@ function mapProjectIdForTransfer_(transfer, indexes) {
 
   // Шаг 3: memo содержит Project_ID
   const regex = PROJECT_ID_REGEX || /\bP?\d{3,6}\b/;
-  const memoMatch = (memo || '').match(regex);
+  const memoMatch = String(memo || '').match(regex);
   if (memoMatch) {
     const projectIdFromMemo = memoMatch[0].replace(/^P/i, ''); // Убираем P если есть
     // Проверим, есть ли такой project_id в PROJECT_MAP
@@ -1056,7 +1056,7 @@ function reclassifyTransfers() {
     dataRange.setValues(data);
   }
 
-  SpreadsheetApp.getUi().alert(`Переклассификация завершена. Обновлено строк: ${count}`);
+  Logger.log(`Переклассификация завершена. Обновлено строк: ${count}`);
   
   writeDebugLog({
     timestamp: new Date().toISOString(),
@@ -1152,7 +1152,7 @@ function remappingProjectIds() {
     anomaliesSheet.getRange(startRow, 1, allAnomalyRows.length, 5).setValues(allAnomalyRows);
   }
 
-  SpreadsheetApp.getUi().alert(`Ремаппинг завершен. Обновлено строк: ${count}`);
+  Logger.log(`Ремаппинг завершен. Обновлено строк: ${count}`);
 
   writeDebugLog({
     timestamp: new Date().toISOString(),
@@ -1430,11 +1430,14 @@ function callClickUpAPI(endpoint, method = 'GET', headers = {}, payload = null) 
     throw new Error('CLICKUP_API_KEY не найден в CONST листе');
   }
 
+  // Добавлено для отладки
+  Logger.log(`[callClickUpAPI] apiKey length: ${apiKey.length}, starts with: ${apiKey.substring(0, 10)}...`);
+
   const baseUrl = 'https://api.clickup.com/api/v2';
   const url = `${baseUrl}${endpoint}`;
 
   const defaultHeaders = {
-    'Authorization': `Bearer ${apiKey}`,
+    'Authorization': apiKey.startsWith('pk_') ? apiKey : `Bearer ${apiKey}`,
     'Content-Type': 'application/json'
   };
 
@@ -1693,17 +1696,13 @@ function getTasksFromLists(listIds, lastUpdated = null) {
     let hasMore = true;
 
     while (hasMore) {
-      const params = new URLSearchParams({
-        page: page,
-        archived: false,
-        include_closed: true
-      });
+      let query = `page=${page}&archived=false&include_closed=true`;
 
       if (lastUpdated) {
-        params.append('date_updated_gt', Math.floor(new Date(lastUpdated).getTime() / 1000));
+        query += `&date_updated_gt=${Math.floor(new Date(lastUpdated).getTime() / 1000)}`;
       }
 
-      const response = callClickUpAPI(`/list/${listId}/task?${params.toString()}`);
+      const response = callClickUpAPI(`/list/${listId}/task?${query}`);
       const tasks = response.tasks || [];
 
       if (tasks.length === 0) {
@@ -1754,6 +1753,7 @@ function parseTaskData(task) {
  */
 function syncClickUpTasks() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const run_id = newRunId_();
   const tasksSheet = ss.getSheetByName(SHEET_CLICKUP_TASKS) || ss.insertSheet(SHEET_CLICKUP_TASKS);
 
   // Инициализировать заголовки если нужно
@@ -1944,7 +1944,7 @@ function updateResidentsFromTasks(tasks) {
     const update = {
       row: residentRowIdx + 1, // 1-based
       curator: customFields['Curator'] || task.assignee,
-      nextAction: customFields['Next_Action'] || task.name,
+      nextAction: customFields['Next_Action'] || task.due_date || task.name,
       nextActionDue: task.due_date,
       nextPaymentDue: customFields['Next_Payment_Due'] ? new Date(customFields['Next_Payment_Due']) : null,
       workStatus: customFields['Work_Status'] || task.status,
@@ -2309,7 +2309,9 @@ function buildFactMonthly() {
   const classIdx = headers.indexOf('class');
   const tagsIdx = headers.indexOf('tags');
 
-  if (datetimeIdx === -1 || amountIdx === -1 || fundAccountKeyIdx === -1 || assetCodeIdx === -1 || assetIssuerIdx === -1 || projectIdIdx === -1 || classIdx === -1 || tagsIdx === -1) {
+const directionIdx = headers.indexOf('direction');
+
+  if (datetimeIdx === -1 || amountIdx === -1 || fundAccountKeyIdx === -1 || assetCodeIdx === -1 || assetIssuerIdx === -1 || projectIdIdx === -1 || classIdx === -1 || tagsIdx === -1 || directionIdx === -1) {
     writeDebugLog({
       run_id,
       module: 'aggregate',
@@ -2338,6 +2340,8 @@ function buildFactMonthly() {
     const projectId = String(row[projectIdIdx] || '').trim();
     const classVal = String(row[classIdx] || '').trim();
     const tags = String(row[tagsIdx] || '').trim();
+
+const direction = String(row[directionIdx] || '').trim();
 
     // Пропустить если class пустой, Unknown, или project_id UNMAPPED/AMBIGUOUS
     if (!classVal || classVal === 'Unknown' || projectId === 'UNMAPPED' || projectId === 'AMBIGUOUS') {
@@ -2370,7 +2374,7 @@ function buildFactMonthly() {
       };
     }
 
-    aggregates[key].amount_asset += amount;
+    aggregates[key].amount_asset += (direction === 'OUT' ? -amount : amount);
   }
 
   // Очистить FACT_MONTHLY

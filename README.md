@@ -112,8 +112,9 @@
 
 ## Быстрый обзор структуры
 
-* Основной скрипт для Apps Script: [`clasp/Резиденты Мабиз.js`](clasp/Резиденты Мабиз.js)
-* Локальные версии/черновики: [`v3.js`](v3.js), [`v2_improved.js`](v2_improved.js), [`v2.js`](v2.js)
+* Основной рабочий скрипт для Apps Script: [`clasp/Резиденты Мабиз.js`](clasp/Резиденты Мабиз.js)
+* Локальные версии/черновики: [`v2_improved.js`](v2_improved.js), [`v2.js`](v2.js)
+* Пользовательская инструкция по меню: [`docs/USER_MENU.md`](docs/USER_MENU.md)
 * Документация Memory Bank: [`memory-bank/`](memory-bank/)
 
 ## Memory Bank (обязательно к соблюдению)

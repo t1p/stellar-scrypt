@@ -117,6 +117,14 @@
 * Пользовательская инструкция по меню: [`docs/USER_MENU.md`](docs/USER_MENU.md)
 * Документация Memory Bank: [`memory-bank/`](memory-bank/)
 
+## Документация для администратора
+
+Для технического обслуживания и эксплуатации таблицы:
+
+* [Настройка и конфигурация](docs/ADMIN_SETUP_AND_CONFIG.md) — конфигурация через лист CONST, безопасность, типовые ошибки
+* [Структура листов и контракты данных](docs/ADMIN_SHEETS_AND_DATA_CONTRACT.md) — подробная документация по каждому листу, режимы работы, риски
+* [Операционный runbook](docs/ADMIN_RUNBOOK.md) — пошаговые инструкции для типовых сценариев, восстановление после сбоев
+
 ## Memory Bank (обязательно к соблюдению)
 
 Документация в каталоге [`memory-bank/`](memory-bank/) ведётся строго по инструкции из [`memory-bank/memory_bank_management_instructions.md`](memory-bank/memory_bank_management_instructions.md). Ключевые правила:

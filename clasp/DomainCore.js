@@ -157,6 +157,13 @@
     return txHash;
   }
 
+  function parseStellarAddressList(value) {
+    return String(value || '')
+      .split(/[,;]/)
+      .map(function (item) { return String(item || '').trim(); })
+      .filter(function (item) { return item.startsWith('G'); });
+  }
+
   function isFundAddress(addr, fundAccounts) {
     return Object.values(fundAccounts || {}).includes(String(addr || '').trim());
   }
@@ -196,6 +203,7 @@
     classifyTransfer,
     mapProjectIdForTransfer,
     parseTxHashFromCell,
+    parseStellarAddressList,
     isFundAddress,
     isResidentAddress,
     evaluateCounterpartyScope

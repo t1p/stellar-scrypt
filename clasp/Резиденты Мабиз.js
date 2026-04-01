@@ -758,10 +758,10 @@ function parseResidentsSheet(sheet) {
     }
     
     // Парсим Account_s (Q)
-    const accounts = (row[16] || '').toString().split(/[,;]/).map(a => a.trim()).filter(a => a.startsWith('G'));
-    
+    const accounts = parseStellarAddressList_(row[16]);
+
     // Парсим Asset_issuer (R)
-    const issuers = (row[17] || '').toString().split(/[,;]/).map(a => a.trim()).filter(a => a.startsWith('G'));
+    const issuers = parseStellarAddressList_(row[17]);
 
     totalAccounts += accounts.length;
     totalIssuers += issuers.length;
@@ -878,8 +878,8 @@ function buildResidentsIndex_() {
   for (let i = 1; i < rows.length; i++) {
     const row = rows[i];
     // Q=Account_s (16), R=Asset_issuer (17)
-    const accounts = (row[16] || '').toString().split(/[,;]/).map(a => a.trim()).filter(a => a.startsWith('G'));
-    const issuers = (row[17] || '').toString().split(/[,;]/).map(a => a.trim()).filter(a => a.startsWith('G'));
+    const accounts = parseStellarAddressList_(row[16]);
+    const issuers = parseStellarAddressList_(row[17]);
 
     for (const a of accounts) {
       if (accountToProjectIds[a]) {
@@ -1304,6 +1304,18 @@ function parseTxHashFromCell_(txCellValue) {
     txHash = txCell;
   }
   return txHash;
+}
+
+function parseStellarAddressList_(value) {
+  const core = getDomainCore_();
+  if (typeof core.parseStellarAddressList === 'function') {
+    return core.parseStellarAddressList(value);
+  }
+
+  return String(value || '')
+    .split(/[,;]/)
+    .map(function (item) { return String(item || '').trim(); })
+    .filter(function (item) { return item.startsWith('G'); });
 }
 
 function fetchAllPayments(baseUrl, fundKey, endDate, log) {

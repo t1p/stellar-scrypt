@@ -1130,12 +1130,7 @@ function remappingProjectIds() {
     // Перемапливаем только UNMAPPED, AMBIGUOUS или пустые
     if (currentProjectId && currentProjectId !== 'UNMAPPED' && currentProjectId !== 'AMBIGUOUS') continue;
 
-    const txCell = String(row[txHashIdx]);
-    const txHashMatch = txCell.match(/transactions\/(\w+)/) || txCell.match(/"([A-Z0-9]+)"\s*\)?$/i);
-    let txHash = txHashMatch ? txHashMatch[1] : '';
-    if (!txHash && /^[A-Z0-9]{10,}$/.test(txCell)) {
-      txHash = txCell;
-    }
+    const txHash = parseTxHashFromCell_(row[txHashIdx]);
 
     const transfer = {
       from: row[fromIdx],
@@ -1272,6 +1267,21 @@ function parseTokenFilter(rawValue) {
     issuer,
     hasIssuer: Boolean(issuer)
   };
+}
+
+function parseTxHashFromCell_(txCellValue) {
+  const core = getDomainCore_();
+  if (typeof core.parseTxHashFromCell === 'function') {
+    return core.parseTxHashFromCell(txCellValue);
+  }
+
+  const txCell = String(txCellValue || '');
+  const txHashMatch = txCell.match(/transactions\/(\w+)/) || txCell.match(/"([A-Z0-9]+)"\s*\)?$/i);
+  let txHash = txHashMatch ? txHashMatch[1] : '';
+  if (!txHash && /^[A-Z0-9]{10,}$/i.test(txCell)) {
+    txHash = txCell;
+  }
+  return txHash;
 }
 
 function fetchAllPayments(baseUrl, fundKey, endDate, log) {

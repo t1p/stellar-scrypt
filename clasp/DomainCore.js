@@ -143,11 +143,22 @@
     return { project_id: 'UNMAPPED', mapping_method: 'UNMAPPED', candidates: [], anomaly };
   }
 
+  function parseTxHashFromCell(txCellValue) {
+    const txCell = String(txCellValue || '');
+    const txHashMatch = txCell.match(/transactions\/(\w+)/) || txCell.match(/"([A-Z0-9]+)"\s*\)?$/i);
+    let txHash = txHashMatch ? txHashMatch[1] : '';
+    if (!txHash && /^[A-Z0-9]{10,}$/i.test(txCell)) {
+      txHash = txCell;
+    }
+    return txHash;
+  }
+
   const api = {
     normalizeAssetKey,
     parseTokenFilter,
     classifyTransfer,
-    mapProjectIdForTransfer
+    mapProjectIdForTransfer,
+    parseTxHashFromCell
   };
 
   if (typeof module !== 'undefined' && module.exports) {

@@ -18,6 +18,7 @@ const SHEET_ANOMALIES = 'ANOMALIES';
 const SHEET_FACT_MONTHLY = 'FACT_MONTHLY';
 const SHEET_KPI_RAW = 'KPI_RAW';
 const SHEET_RESIDENT_TRACKING = 'RESIDENT_TRACKING';
+const SHEET_RESIDENT_TIMELINE = 'RESIDENT_TIMELINE';
 
 const MEMO_CACHE_TTL = 21600; // 6 часов
 const MAX_MEMO_FETCH_PER_RUN = 300;
@@ -59,6 +60,8 @@ function onOpen() {
     .addItem('Создать FACT_MONTHLY', 'initializeFactMonthly')
     .addItem('Создать KPI_RAW', 'initializeKpiRaw')
     .addItem('Инициализировать новые листы', 'initializeNewSheets')
+    .addSeparator()
+    .addItem('Собрать RESIDENT_TIMELINE', 'buildResidentTimeline')
     .addSeparator()
     .addItem('Собрать FACT_MONTHLY', 'buildFactMonthly')
     .addItem('Собрать KPI_RAW', 'buildKpiRaw')
@@ -1420,7 +1423,44 @@ function buildResidentTrackingDataset_(transfers, options) {
   return rows;
 }
 
+function buildResidentTimelineReadModel_(trackingRows, options) {
+  const core = getDomainCore_();
+  if (typeof core.buildResidentTimelineReadModel === 'function') {
+    return core.buildResidentTimelineReadModel(trackingRows, options);
+  }
+  return [];
+}
+
 function readTransfersRowsAsObjects_(sheet) {
+  if (!sheet || sheet.getLastRow() <= 1) return [];
+  const values = sheet.getDataRange().getValues();
+  const headers = values[0].map(h => String(h || '').trim());
+  const rows = [];
+  for (let i = 1; i < values.length; i++) {
+    const row = values[i];
+    const entry = {};
+    for (let c = 0; c < headers.length; c++) {
+      if (!headers[c]) continue;
+      entry[headers[c]] = row[c];
+    }
+    rows.push(entry);
+  }
+  return rows;
+}
+
+function validateSheetHeaders_(headers, requiredHeaders) {
+  const missing = [];
+  const list = Array.isArray(headers) ? headers : [];
+  const required = Array.isArray(requiredHeaders) ? requiredHeaders : [];
+  for (let i = 0; i < required.length; i++) {
+    if (list.indexOf(required[i]) === -1) {
+      missing.push(required[i]);
+    }
+  }
+  return missing;
+}
+
+function readSheetRowsAsObjects_(sheet) {
   if (!sheet || sheet.getLastRow() <= 1) return [];
   const values = sheet.getDataRange().getValues();
   const headers = values[0].map(h => String(h || '').trim());
@@ -1532,6 +1572,122 @@ function syncResidentTracking() {
     rows_written_tracking: dataset.length,
     first_contacts_count: firstContacts,
     details: `Resident tracking snapshot built: ${dataset.length} rows, ${firstContacts} first contacts`
+  });
+}
+
+function initializeResidentTimeline() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(SHEET_RESIDENT_TIMELINE) || ss.insertSheet(SHEET_RESIDENT_TIMELINE);
+  if (sheet.getLastRow() === 0) {
+    sheet.appendRow([
+      'datetime',
+      'entry_point_at',
+      'days_since_entry_point',
+      'event_index',
+      'is_entry_point',
+      'source_is_first_contact',
+      'interaction_key',
+      'project_id',
+      'resident_label',
+      'resident_address',
+      'fund_account_key',
+      'fund_address',
+      'direction',
+      'counterparty_type',
+      'from',
+      'to',
+      'asset_code',
+      'asset_issuer',
+      'amount',
+      'class',
+      'memo',
+      'tx_hash'
+    ]);
+    sheet.getRange('A:B').setNumberFormat('dd-mm-yyyy hh:mm:ss');
+    sheet.getRange('S:S').setNumberFormat('0,########');
+  }
+}
+
+function buildResidentTimeline() {
+  const run_id = newRunId_();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const trackingSheet = ss.getSheetByName(SHEET_RESIDENT_TRACKING);
+  const timelineSheet = ss.getSheetByName(SHEET_RESIDENT_TIMELINE) || ss.insertSheet(SHEET_RESIDENT_TIMELINE);
+
+  initializeResidentTimeline();
+
+  if (!trackingSheet || trackingSheet.getLastRow() <= 1) {
+    writeDebugLog({
+      run_id,
+      module: 'resident_timeline',
+      timestamp: new Date().toISOString(),
+      stage: 'buildResidentTimeline',
+      fundKey: 'ERROR',
+      details: 'RESIDENT_TRACKING sheet is empty or not found'
+    });
+    return;
+  }
+
+  const trackingHeaders = trackingSheet.getRange(1, 1, 1, trackingSheet.getLastColumn()).getValues()[0].map(h => String(h || '').trim());
+  const requiredHeaders = ['datetime', 'project_id', 'resident_address', 'fund_address', 'direction', 'from', 'to', 'asset_code', 'asset_issuer', 'amount', 'class', 'memo', 'tx_hash'];
+  const missing = validateSheetHeaders_(trackingHeaders, requiredHeaders);
+  if (missing.length > 0) {
+    writeDebugLog({
+      run_id,
+      module: 'resident_timeline',
+      timestamp: new Date().toISOString(),
+      stage: 'buildResidentTimeline',
+      fundKey: 'ERROR',
+      details: `Missing required columns in RESIDENT_TRACKING: ${missing.join(', ')}`
+    });
+    return;
+  }
+
+  const sourceRows = readSheetRowsAsObjects_(trackingSheet);
+  const timelineRows = buildResidentTimelineReadModel_(sourceRows, {
+    maxRows: 100000
+  });
+
+  timelineSheet.clearContents();
+  initializeResidentTimeline();
+
+  if (timelineRows.length > 0) {
+    const rows = timelineRows.map((row) => [
+      row.datetime,
+      row.entry_point_at,
+      row.days_since_entry_point,
+      row.event_index,
+      row.is_entry_point,
+      row.source_is_first_contact,
+      row.interaction_key,
+      row.project_id,
+      row.resident_label,
+      row.resident_address,
+      row.fund_account_key,
+      row.fund_address,
+      row.direction,
+      row.counterparty_type,
+      row.from,
+      row.to,
+      row.asset_code,
+      row.asset_issuer,
+      row.amount,
+      row.class,
+      row.memo,
+      row.tx_hash
+    ]);
+    timelineSheet.getRange(2, 1, rows.length, rows[0].length).setValues(rows);
+  }
+
+  writeDebugLog({
+    run_id,
+    module: 'resident_timeline',
+    timestamp: new Date().toISOString(),
+    stage: 'buildResidentTimeline',
+    fundKey: 'SUCCESS',
+    rows_read_tracking: sourceRows.length,
+    rows_written_timeline: timelineRows.length,
+    details: `Resident timeline built: ${timelineRows.length} rows`
   });
 }
 

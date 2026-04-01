@@ -322,6 +322,81 @@
     return rows;
   }
 
+  function buildResidentTimelineReadModel(trackingRows, options) {
+    const list = Array.isArray(trackingRows) ? trackingRows : [];
+    const opts = options || {};
+    const out = [];
+
+    for (let i = 0; i < list.length; i++) {
+      const row = list[i] || {};
+      const datetime = toDate_(row.datetime);
+      if (!datetime) continue;
+
+      const projectId = String(row.project_id || '').trim();
+      const residentAddress = String(row.resident_address || '').trim();
+      if (!projectId || !residentAddress) continue;
+
+      out.push({
+        datetime,
+        project_id: projectId,
+        resident_label: String(row.resident_label || '').trim(),
+        resident_address: residentAddress,
+        fund_account_key: String(row.fund_account_key || '').trim(),
+        fund_address: String(row.fund_address || '').trim(),
+        direction: String(row.direction || '').trim().toUpperCase(),
+        counterparty_type: String(row.counterparty_type || '').trim().toUpperCase(),
+        from: String(row.from || '').trim(),
+        to: String(row.to || '').trim(),
+        asset_code: String(row.asset_code || '').trim(),
+        asset_issuer: String(row.asset_issuer || '').trim(),
+        amount: Number(row.amount || 0),
+        class: String(row.class || '').trim(),
+        memo: String(row.memo || '').trim(),
+        tx_hash: String(row.tx_hash || '').trim(),
+        source_is_first_contact: Boolean(row.is_first_contact),
+        interaction_key: `${projectId}|${residentAddress}`,
+        is_entry_point: false,
+        entry_point_at: null,
+        event_index: 0,
+        days_since_entry_point: 0
+      });
+    }
+
+    out.sort(function (a, b) {
+      return a.datetime.getTime() - b.datetime.getTime();
+    });
+
+    const pairState = {};
+    for (let i = 0; i < out.length; i++) {
+      const row = out[i];
+      const key = row.interaction_key;
+      if (!pairState[key]) {
+        pairState[key] = {
+          firstAt: row.datetime,
+          index: 0
+        };
+      }
+      pairState[key].index += 1;
+
+      const firstAt = pairState[key].firstAt;
+      const dayMs = 24 * 60 * 60 * 1000;
+      const firstDay = Date.UTC(firstAt.getUTCFullYear(), firstAt.getUTCMonth(), firstAt.getUTCDate());
+      const currentDay = Date.UTC(row.datetime.getUTCFullYear(), row.datetime.getUTCMonth(), row.datetime.getUTCDate());
+
+      row.entry_point_at = firstAt;
+      row.event_index = pairState[key].index;
+      row.is_entry_point = pairState[key].index === 1;
+      row.days_since_entry_point = Math.max(0, Math.floor((currentDay - firstDay) / dayMs));
+    }
+
+    const maxRows = Number(opts.maxRows || 0);
+    if (maxRows > 0 && out.length > maxRows) {
+      return out.slice(0, maxRows);
+    }
+
+    return out;
+  }
+
   const api = {
     normalizeAssetKey,
     normalizeTokenPart,
@@ -335,7 +410,8 @@
     isFundAddress,
     isResidentAddress,
     evaluateCounterpartyScope,
-    buildResidentTrackingDataset
+    buildResidentTrackingDataset,
+    buildResidentTimelineReadModel
   };
 
   if (typeof module !== 'undefined' && module.exports) {

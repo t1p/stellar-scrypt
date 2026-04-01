@@ -487,6 +487,91 @@
     return out;
   }
 
+  function buildIssuerStructureSnapshot(trackingRows, options) {
+    const list = Array.isArray(trackingRows) ? trackingRows : [];
+    const opts = options || {};
+    const maxInputRows = Number(opts.maxInputRows || 0);
+    const limit = maxInputRows > 0 ? Math.min(maxInputRows, list.length) : list.length;
+    const acc = {};
+
+    for (let i = 0; i < limit; i++) {
+      const row = list[i] || {};
+      const datetime = toDate_(row.datetime);
+      if (!datetime) continue;
+
+      const projectId = String(row.project_id || '').trim();
+      const residentAddress = String(row.resident_address || '').trim();
+      const fundAddress = String(row.fund_address || '').trim();
+      const from = String(row.from || '').trim();
+      const to = String(row.to || '').trim();
+      if (!projectId || !residentAddress || !from || !to) continue;
+
+      const direction = String(row.direction || '').trim().toUpperCase();
+      const counterpartyType = String(row.counterparty_type || '').trim().toUpperCase();
+      const txHash = String(row.tx_hash || '').trim();
+
+      const edgeKey = [projectId, residentAddress, fundAddress, from, to, direction, counterpartyType].join('|');
+      if (!acc[edgeKey]) {
+        acc[edgeKey] = {
+          project_id: projectId,
+          resident_label: String(row.resident_label || '').trim(),
+          resident_address: residentAddress,
+          fund_address: fundAddress,
+          from,
+          to,
+          direction,
+          counterparty_type: counterpartyType,
+          tx_count: 0,
+          first_seen_at: datetime,
+          last_seen_at: datetime,
+          _hashes: {}
+        };
+      }
+
+      const item = acc[edgeKey];
+      if (datetime.getTime() < item.first_seen_at.getTime()) item.first_seen_at = datetime;
+      if (datetime.getTime() > item.last_seen_at.getTime()) item.last_seen_at = datetime;
+
+      if (txHash) {
+        if (!item._hashes[txHash]) {
+          item._hashes[txHash] = true;
+          item.tx_count += 1;
+        }
+      } else {
+        item.tx_count += 1;
+      }
+    }
+
+    const out = Object.keys(acc).map(function (key) {
+      const row = acc[key];
+      return {
+        project_id: row.project_id,
+        resident_label: row.resident_label,
+        resident_address: row.resident_address,
+        fund_address: row.fund_address,
+        from: row.from,
+        to: row.to,
+        direction: row.direction,
+        counterparty_type: row.counterparty_type,
+        tx_count: row.tx_count,
+        first_seen_at: row.first_seen_at,
+        last_seen_at: row.last_seen_at
+      };
+    });
+
+    out.sort(function (a, b) {
+      if (a.project_id !== b.project_id) return a.project_id < b.project_id ? -1 : 1;
+      if (a.resident_address !== b.resident_address) return a.resident_address < b.resident_address ? -1 : 1;
+      return a.first_seen_at.getTime() - b.first_seen_at.getTime();
+    });
+
+    const maxOutputRows = Number(opts.maxOutputRows || 0);
+    if (maxOutputRows > 0 && out.length > maxOutputRows) {
+      return out.slice(0, maxOutputRows);
+    }
+    return out;
+  }
+
   const api = {
     normalizeAssetKey,
     normalizeTokenPart,
@@ -502,7 +587,8 @@
     evaluateCounterpartyScope,
     buildResidentTrackingDataset,
     buildResidentTimelineReadModel,
-    buildTokenFlowSnapshot
+    buildTokenFlowSnapshot,
+    buildIssuerStructureSnapshot
   };
 
   if (typeof module !== 'undefined' && module.exports) {

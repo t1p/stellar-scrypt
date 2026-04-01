@@ -20,6 +20,7 @@ const SHEET_KPI_RAW = 'KPI_RAW';
 const SHEET_RESIDENT_TRACKING = 'RESIDENT_TRACKING';
 const SHEET_RESIDENT_TIMELINE = 'RESIDENT_TIMELINE';
 const SHEET_TOKEN_FLOWS = 'TOKEN_FLOWS';
+const SHEET_ISSUER_STRUCTURE = 'ISSUER_STRUCTURE';
 
 const MEMO_CACHE_TTL = 21600; // 6 часов
 const MAX_MEMO_FETCH_PER_RUN = 300;
@@ -64,6 +65,7 @@ function onOpen() {
     .addSeparator()
     .addItem('Собрать RESIDENT_TIMELINE', 'buildResidentTimeline')
     .addItem('Собрать TOKEN_FLOWS', 'buildTokenFlows')
+    .addItem('Собрать ISSUER_STRUCTURE', 'buildIssuerStructure')
     .addSeparator()
     .addItem('Собрать FACT_MONTHLY', 'buildFactMonthly')
     .addItem('Собрать KPI_RAW', 'buildKpiRaw')
@@ -1441,6 +1443,14 @@ function buildTokenFlowSnapshot_(trackingRows, options) {
   return [];
 }
 
+function buildIssuerStructureSnapshot_(trackingRows, options) {
+  const core = getDomainCore_();
+  if (typeof core.buildIssuerStructureSnapshot === 'function') {
+    return core.buildIssuerStructureSnapshot(trackingRows, options);
+  }
+  return [];
+}
+
 function readTransfersRowsAsObjects_(sheet) {
   if (!sheet || sheet.getLastRow() <= 1) return [];
   const values = sheet.getDataRange().getValues();
@@ -1795,6 +1805,100 @@ function buildTokenFlows() {
     rows_read_tracking: sourceRows.length,
     rows_written_token_flows: flowRows.length,
     details: `Token flows snapshot built: ${flowRows.length} rows`
+  });
+}
+
+function initializeIssuerStructure() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(SHEET_ISSUER_STRUCTURE) || ss.insertSheet(SHEET_ISSUER_STRUCTURE);
+  if (sheet.getLastRow() === 0) {
+    sheet.appendRow([
+      'project_id',
+      'resident_label',
+      'resident_address',
+      'fund_address',
+      'from',
+      'to',
+      'direction',
+      'counterparty_type',
+      'tx_count',
+      'first_seen_at',
+      'last_seen_at'
+    ]);
+    sheet.getRange('J:K').setNumberFormat('dd-mm-yyyy hh:mm:ss');
+  }
+}
+
+function buildIssuerStructure() {
+  const run_id = newRunId_();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const trackingSheet = ss.getSheetByName(SHEET_RESIDENT_TRACKING);
+  const structureSheet = ss.getSheetByName(SHEET_ISSUER_STRUCTURE) || ss.insertSheet(SHEET_ISSUER_STRUCTURE);
+
+  initializeIssuerStructure();
+
+  if (!trackingSheet || trackingSheet.getLastRow() <= 1) {
+    writeDebugLog({
+      run_id,
+      module: 'issuer_structure',
+      timestamp: new Date().toISOString(),
+      stage: 'buildIssuerStructure',
+      fundKey: 'ERROR',
+      details: 'RESIDENT_TRACKING sheet is empty or not found'
+    });
+    return;
+  }
+
+  const trackingHeaders = trackingSheet.getRange(1, 1, 1, trackingSheet.getLastColumn()).getValues()[0].map(h => String(h || '').trim());
+  const requiredHeaders = ['datetime', 'project_id', 'resident_address', 'fund_address', 'from', 'to', 'direction', 'counterparty_type', 'tx_hash'];
+  const missing = validateSheetHeaders_(trackingHeaders, requiredHeaders);
+  if (missing.length > 0) {
+    writeDebugLog({
+      run_id,
+      module: 'issuer_structure',
+      timestamp: new Date().toISOString(),
+      stage: 'buildIssuerStructure',
+      fundKey: 'ERROR',
+      details: `Missing required columns in RESIDENT_TRACKING: ${missing.join(', ')}`
+    });
+    return;
+  }
+
+  const sourceRows = readSheetRowsAsObjects_(trackingSheet);
+  const structureRows = buildIssuerStructureSnapshot_(sourceRows, {
+    maxInputRows: 100000,
+    maxOutputRows: 50000
+  });
+
+  structureSheet.clearContents();
+  initializeIssuerStructure();
+
+  if (structureRows.length > 0) {
+    const rows = structureRows.map((row) => [
+      row.project_id,
+      row.resident_label,
+      row.resident_address,
+      row.fund_address,
+      row.from,
+      row.to,
+      row.direction,
+      row.counterparty_type,
+      row.tx_count,
+      row.first_seen_at,
+      row.last_seen_at
+    ]);
+    structureSheet.getRange(2, 1, rows.length, rows[0].length).setValues(rows);
+  }
+
+  writeDebugLog({
+    run_id,
+    module: 'issuer_structure',
+    timestamp: new Date().toISOString(),
+    stage: 'buildIssuerStructure',
+    fundKey: 'SUCCESS',
+    rows_read_tracking: sourceRows.length,
+    rows_written_issuer_structure: structureRows.length,
+    details: `Issuer structure snapshot built: ${structureRows.length} rows`
   });
 }
 

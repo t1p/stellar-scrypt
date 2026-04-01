@@ -2,23 +2,7 @@
  * Unit tests for parseTokenFilter function
  */
 
-// Copy of the parseTokenFilter function
-function parseTokenFilter(rawValue) {
-  const raw = String(rawValue || '').trim();
-  if (!raw) return { raw: '', norm: '', code: '', issuer: '', hasIssuer: false };
-  const normalized = raw.replace(/\s+/g, '').toUpperCase();
-  const normalizedSep = normalized.replace(/[\/|]/g, ':');
-  const parts = normalizedSep.split(':').filter(Boolean);
-  const code = parts[0] || '';
-  const issuer = parts[1] || '';
-  return {
-    raw,
-    norm: normalizedSep,
-    code,
-    issuer,
-    hasIssuer: Boolean(issuer)
-  };
-}
+const { parseTokenFilter } = require('../clasp/DomainCore');
 
 describe('parseTokenFilter', () => {
   it('should handle empty input', () => {

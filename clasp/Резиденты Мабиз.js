@@ -33,6 +33,10 @@ const MEMO_PATTERNS_DIVIDEND = 'dividend|дивиденд|profit|прибыль'
 const MEMO_PATTERNS_OPEX = 'opex|опекс|fee|комиссия';
 const CLASSIFY_ENABLE = true;
 
+function getDomainCore_() {
+  return (typeof globalThis !== 'undefined' && globalThis.__domainCore) ? globalThis.__domainCore : {};
+}
+
 // ========== Меню ==========
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
@@ -957,6 +961,11 @@ function mapProjectIdForTransfer_(transfer, indexes) {
 }
 
 function classifyTransfer_(transfer, rules) {
+  const core = getDomainCore_();
+  if (typeof core.classifyTransfer === 'function') {
+    return core.classifyTransfer(transfer, rules, CLASSIFY_ENABLE);
+  }
+
   const { direction, counterpartyType, memo, class_override } = transfer;
 
   // Приоритет: class_override всегда имеет приоритет
@@ -1216,6 +1225,11 @@ function normalizeTokenPart(value) {
 }
 
 function normalizeAssetKey_(value) {
+  const core = getDomainCore_();
+  if (typeof core.normalizeAssetKey === 'function') {
+    return core.normalizeAssetKey(value);
+  }
+
   const raw = String(value || '').trim();
   if (!raw) return '';
   const normalized = raw.replace(/[\s/|]/g, ':').toUpperCase();
@@ -1226,6 +1240,11 @@ function normalizeAssetKey_(value) {
 }
 
 function parseTokenFilter(rawValue) {
+  const core = getDomainCore_();
+  if (typeof core.parseTokenFilter === 'function') {
+    return core.parseTokenFilter(rawValue);
+  }
+
   const raw = String(rawValue || '').trim();
   if (!raw) return { raw: '', norm: '', code: '', issuer: '', hasIssuer: false };
   const normalized = raw.replace(/\s+/g, '').toUpperCase();

@@ -894,6 +894,19 @@ function buildResidentsIndex_() {
 }
 
 function mapProjectIdForTransfer_(transfer, indexes) {
+  const core = getDomainCore_();
+  if (typeof core.mapProjectIdForTransfer === 'function') {
+    const regex = PROJECT_ID_REGEX || /\bP?\d{3,6}\b/;
+    return core.mapProjectIdForTransfer(transfer, indexes, {
+      projectIdRegex: regex,
+      isProjectIdKnown: function (projectId) {
+        const ss = SpreadsheetApp.getActiveSpreadsheet();
+        const projectMap = parseProjectMapSheet(ss.getSheetByName(SHEET_PROJECT_MAP));
+        return Boolean(projectMap[projectId]);
+      }
+    });
+  }
+
   const { from, to, asset_issuer, memo } = transfer;
   const { accountToProjectIds, issuerToProjectIds } = indexes.residentsIndex;
   

@@ -17,6 +17,7 @@ const SHEET_PROJECT_MAP = 'PROJECT_MAP';
 const SHEET_ANOMALIES = 'ANOMALIES';
 const SHEET_FACT_MONTHLY = 'FACT_MONTHLY';
 const SHEET_KPI_RAW = 'KPI_RAW';
+const SHEET_RESIDENT_TRACKING = 'RESIDENT_TRACKING';
 
 const MEMO_CACHE_TTL = 21600; // 6 часов
 const MAX_MEMO_FETCH_PER_RUN = 300;
@@ -1333,6 +1334,205 @@ function addressListContains_(value, targetAddress) {
   const target = String(targetAddress || '').trim();
   if (!target) return false;
   return parseStellarAddressList_(value).includes(target);
+}
+
+function buildResidentTrackingDataset_(transfers, options) {
+  const core = getDomainCore_();
+  if (typeof core.buildResidentTrackingDataset === 'function') {
+    return core.buildResidentTrackingDataset(transfers, options);
+  }
+
+  const rows = [];
+  const list = Array.isArray(transfers) ? transfers : [];
+  const opts = options || {};
+  const residentsMap = opts.residentsMap || {};
+  const fundAccounts = opts.fundAccounts || {};
+
+  for (let i = 0; i < list.length; i++) {
+    const t = list[i] || {};
+    const from = String(t.from || '').trim();
+    const to = String(t.to || '').trim();
+    const direction = String(t.direction || '').trim().toUpperCase();
+    const counterpartyType = String(t.counterparty_type || '').trim().toUpperCase();
+    const datetime = new Date(t.datetime);
+    if (isNaN(datetime.getTime())) continue;
+
+    const fromResidentLabel = residentsMap[from] || '';
+    const toResidentLabel = residentsMap[to] || '';
+    let residentAddress = '';
+    let residentLabel = '';
+
+    if (fromResidentLabel && toResidentLabel) {
+      residentAddress = direction === 'OUT' ? to : from;
+      residentLabel = direction === 'OUT' ? toResidentLabel : fromResidentLabel;
+    } else if (fromResidentLabel) {
+      residentAddress = from;
+      residentLabel = fromResidentLabel;
+    } else if (toResidentLabel) {
+      residentAddress = to;
+      residentLabel = toResidentLabel;
+    } else if (counterpartyType === 'RESIDENT') {
+      residentAddress = direction === 'IN' ? from : to;
+      residentLabel = '';
+    } else {
+      continue;
+    }
+
+    const fromIsFund = isFund(from, fundAccounts);
+    const toIsFund = isFund(to, fundAccounts);
+    let fundAddress = '';
+    if (fromIsFund && !toIsFund) fundAddress = from;
+    else if (toIsFund && !fromIsFund) fundAddress = to;
+    else if (direction === 'IN') fundAddress = to;
+    else if (direction === 'OUT') fundAddress = from;
+
+    rows.push({
+      datetime,
+      project_id: String(t.project_id || '').trim(),
+      resident_address: residentAddress,
+      resident_label: residentLabel,
+      fund_address: fundAddress,
+      fund_account_key: String(t.fund_account_key || '').trim(),
+      direction,
+      counterparty_type: counterpartyType,
+      from,
+      to,
+      asset_code: String(t.asset_code || t.asset || '').trim(),
+      asset_issuer: String(t.asset_issuer || '').trim(),
+      amount: Number(t.amount || 0),
+      class: String(t.class || '').trim(),
+      memo: String(t.memo || '').trim(),
+      tx_hash: parseTxHashFromCell_(t.tx_hash || ''),
+      is_first_contact: false
+    });
+  }
+
+  rows.sort((a, b) => a.datetime.getTime() - b.datetime.getTime());
+  const firstSeen = {};
+  rows.forEach((row) => {
+    const key = `${row.project_id}|${row.resident_address}`;
+    if (!firstSeen[key]) {
+      row.is_first_contact = true;
+      firstSeen[key] = true;
+    }
+  });
+
+  return rows;
+}
+
+function readTransfersRowsAsObjects_(sheet) {
+  if (!sheet || sheet.getLastRow() <= 1) return [];
+  const values = sheet.getDataRange().getValues();
+  const headers = values[0].map(h => String(h || '').trim());
+  const rows = [];
+  for (let i = 1; i < values.length; i++) {
+    const row = values[i];
+    const entry = {};
+    for (let c = 0; c < headers.length; c++) {
+      if (!headers[c]) continue;
+      entry[headers[c]] = row[c];
+    }
+    rows.push(entry);
+  }
+  return rows;
+}
+
+/**
+ * Первый resident-tracking use-case:
+ * строит resident-centric dataset взаимодействий на основе TRANSFERS+RESIDENTS
+ * и сохраняет snapshot в RESIDENT_TRACKING.
+ */
+function syncResidentTracking() {
+  const run_id = newRunId_();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const transfersSheet = ss.getSheetByName(SHEET_TRANSFERS);
+  const residentsSheet = ss.getSheetByName(SHEET_RESIDENTS);
+  const constSheet = ss.getSheetByName(SHEET_CONST);
+  const trackingSheet = ss.getSheetByName(SHEET_RESIDENT_TRACKING) || ss.insertSheet(SHEET_RESIDENT_TRACKING);
+
+  const headers = [
+    'datetime',
+    'project_id',
+    'resident_label',
+    'resident_address',
+    'fund_account_key',
+    'fund_address',
+    'direction',
+    'counterparty_type',
+    'from',
+    'to',
+    'asset_code',
+    'asset_issuer',
+    'amount',
+    'class',
+    'memo',
+    'tx_hash',
+    'is_first_contact'
+  ];
+
+  if (!transfersSheet || transfersSheet.getLastRow() <= 1 || !residentsSheet || !constSheet) {
+    if (trackingSheet.getLastRow() === 0) {
+      trackingSheet.appendRow(headers);
+    }
+    writeDebugLog({
+      run_id,
+      module: 'resident_tracking',
+      timestamp: new Date().toISOString(),
+      stage: 'syncResidentTracking',
+      fundKey: 'ERROR',
+      details: 'Missing required sheets or empty TRANSFERS'
+    });
+    return;
+  }
+
+  const residentsMap = parseResidentsSheet(residentsSheet);
+  const fundAccounts = parseConstSheet(constSheet).fundAccounts || {};
+  const transfers = readTransfersRowsAsObjects_(transfersSheet);
+  const dataset = buildResidentTrackingDataset_(transfers, {
+    residentsMap,
+    fundAccounts
+  }).filter(row => row.project_id && row.project_id !== 'UNMAPPED' && row.project_id !== 'AMBIGUOUS');
+
+  trackingSheet.clearContents();
+  trackingSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+
+  if (dataset.length > 0) {
+    const rows = dataset.map((row) => [
+      row.datetime,
+      row.project_id,
+      row.resident_label,
+      row.resident_address,
+      row.fund_account_key,
+      row.fund_address,
+      row.direction,
+      row.counterparty_type,
+      row.from,
+      row.to,
+      row.asset_code,
+      row.asset_issuer,
+      row.amount,
+      row.class,
+      row.memo,
+      row.tx_hash,
+      row.is_first_contact
+    ]);
+    trackingSheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
+    trackingSheet.getRange('A:A').setNumberFormat('dd-mm-yyyy hh:mm:ss');
+    trackingSheet.getRange('M:M').setNumberFormat('0,########');
+  }
+
+  const firstContacts = dataset.filter(r => r.is_first_contact).length;
+  writeDebugLog({
+    run_id,
+    module: 'resident_tracking',
+    timestamp: new Date().toISOString(),
+    stage: 'syncResidentTracking',
+    fundKey: 'SUCCESS',
+    rows_read_transfers: transfers.length,
+    rows_written_tracking: dataset.length,
+    first_contacts_count: firstContacts,
+    details: `Resident tracking snapshot built: ${dataset.length} rows, ${firstContacts} first contacts`
+  });
 }
 
 function fetchAllPayments(baseUrl, fundKey, endDate, log) {

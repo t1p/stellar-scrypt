@@ -229,6 +229,99 @@
     return (fromIsRes && toIsFund) || (fromIsFund && toIsRes);
   }
 
+  function toDate_(value) {
+    if (value instanceof Date) {
+      return isNaN(value.getTime()) ? null : value;
+    }
+    const parsed = new Date(value);
+    return isNaN(parsed.getTime()) ? null : parsed;
+  }
+
+  function buildResidentTrackingDataset(transfers, options) {
+    const rows = [];
+    const list = Array.isArray(transfers) ? transfers : [];
+    const opts = options || {};
+    const residentsMap = opts.residentsMap || {};
+    const fundAccounts = opts.fundAccounts || {};
+
+    for (let i = 0; i < list.length; i++) {
+      const t = list[i] || {};
+      const from = String(t.from || '').trim();
+      const to = String(t.to || '').trim();
+      const direction = String(t.direction || '').trim().toUpperCase();
+      const counterpartyType = String(t.counterparty_type || '').trim().toUpperCase();
+      const datetime = toDate_(t.datetime);
+
+      if (!datetime) continue;
+
+      const fromResidentLabel = residentsMap[from] || '';
+      const toResidentLabel = residentsMap[to] || '';
+
+      let residentAddress = '';
+      let residentLabel = '';
+
+      if (fromResidentLabel && toResidentLabel) {
+        residentAddress = direction === 'OUT' ? to : from;
+        residentLabel = direction === 'OUT' ? toResidentLabel : fromResidentLabel;
+      } else if (fromResidentLabel) {
+        residentAddress = from;
+        residentLabel = fromResidentLabel;
+      } else if (toResidentLabel) {
+        residentAddress = to;
+        residentLabel = toResidentLabel;
+      } else if (counterpartyType === 'RESIDENT') {
+        residentAddress = direction === 'IN' ? from : to;
+        residentLabel = '';
+      } else {
+        continue;
+      }
+
+      const fromIsFund = isFundAddress(from, fundAccounts);
+      const toIsFund = isFundAddress(to, fundAccounts);
+      let fundAddress = '';
+      if (fromIsFund && !toIsFund) fundAddress = from;
+      else if (toIsFund && !fromIsFund) fundAddress = to;
+      else if (direction === 'IN') fundAddress = to;
+      else if (direction === 'OUT') fundAddress = from;
+
+      rows.push({
+        datetime,
+        project_id: String(t.project_id || '').trim(),
+        resident_address: residentAddress,
+        resident_label: residentLabel,
+        fund_address: fundAddress,
+        fund_account_key: String(t.fund_account_key || '').trim(),
+        direction,
+        counterparty_type: counterpartyType,
+        from,
+        to,
+        asset_code: String(t.asset_code || t.asset || '').trim(),
+        asset_issuer: String(t.asset_issuer || '').trim(),
+        amount: Number(t.amount || 0),
+        class: String(t.class || '').trim(),
+        memo: String(t.memo || '').trim(),
+        tx_hash: parseTxHashFromCell(t.tx_hash || ''),
+        is_first_contact: false
+      });
+    }
+
+    rows.sort(function (a, b) {
+      return a.datetime.getTime() - b.datetime.getTime();
+    });
+
+    const firstSeen = {};
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const firstKey = `${row.project_id}|${row.resident_address}`;
+      if (!firstSeen[firstKey]) {
+        row.is_first_contact = true;
+        firstSeen[firstKey] = true;
+      }
+    }
+
+    return rows;
+  }
+
   const api = {
     normalizeAssetKey,
     normalizeTokenPart,
@@ -241,7 +334,8 @@
     resolveResidentsColumnIndexes,
     isFundAddress,
     isResidentAddress,
-    evaluateCounterpartyScope
+    evaluateCounterpartyScope,
+    buildResidentTrackingDataset
   };
 
   if (typeof module !== 'undefined' && module.exports) {

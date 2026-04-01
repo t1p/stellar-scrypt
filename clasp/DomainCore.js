@@ -164,6 +164,33 @@
       .filter(function (item) { return item.startsWith('G'); });
   }
 
+  function normalizeHeaderKey(value) {
+    return String(value || '')
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, '_');
+  }
+
+  function resolveResidentsColumnIndexes(headers, defaults) {
+    const fallback = defaults || { labelIdx: 1, accountsIdx: 16, issuersIdx: 17 };
+    const rawHeaders = Array.isArray(headers) ? headers : [];
+    if (!rawHeaders.length) {
+      return fallback;
+    }
+
+    const normalized = rawHeaders.map(normalizeHeaderKey);
+    const findIdx = function (key, fallbackIdx) {
+      const idx = normalized.indexOf(key);
+      return idx >= 0 ? idx : fallbackIdx;
+    };
+
+    return {
+      labelIdx: findIdx('label', fallback.labelIdx),
+      accountsIdx: findIdx('account_s', fallback.accountsIdx),
+      issuersIdx: findIdx('asset_issuer', fallback.issuersIdx)
+    };
+  }
+
   function isFundAddress(addr, fundAccounts) {
     return Object.values(fundAccounts || {}).includes(String(addr || '').trim());
   }
@@ -204,6 +231,7 @@
     mapProjectIdForTransfer,
     parseTxHashFromCell,
     parseStellarAddressList,
+    resolveResidentsColumnIndexes,
     isFundAddress,
     isResidentAddress,
     evaluateCounterpartyScope

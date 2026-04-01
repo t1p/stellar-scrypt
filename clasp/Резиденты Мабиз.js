@@ -744,20 +744,21 @@ function parseResidentsSheet(sheet) {
   let totalAccounts = 0;
   let totalIssuers = 0;
   let skippedNoLabel = 0;
-  // Предполагаем, что B=label (индекс 1), Q=Account_s (индекс 16), R=Asset_issuer (индекс 17)
+  const residentCols = resolveResidentsColumnIndexes_(rows[0]);
+  // По умолчанию: B=label (1), Q=Account_s (16), R=Asset_issuer (17)
   for (let i = 1; i < rows.length; i++) { // Начинаем с 1, пропуская заголовок
     const row = rows[i];
-    const label = (row[1] || '').toString().trim();
+    const label = (row[residentCols.labelIdx] || '').toString().trim();
     if (!label) {
       skippedNoLabel++;
       continue;
     }
-    
+
     // Парсим Account_s (Q)
-    const accounts = parseStellarAddressList_(row[16]);
+    const accounts = parseStellarAddressList_(row[residentCols.accountsIdx]);
 
     // Парсим Asset_issuer (R)
-    const issuers = parseStellarAddressList_(row[17]);
+    const issuers = parseStellarAddressList_(row[residentCols.issuersIdx]);
 
     totalAccounts += accounts.length;
     totalIssuers += issuers.length;
@@ -871,11 +872,12 @@ function buildResidentsIndex_() {
 
   // Читаем RESIDENTS напрямую для получения всех аккаунтов и эмитентов
   const rows = resSheet.getDataRange().getValues();
+  const residentCols = resolveResidentsColumnIndexes_(rows[0]);
   for (let i = 1; i < rows.length; i++) {
     const row = rows[i];
-    // Q=Account_s (16), R=Asset_issuer (17)
-    const accounts = parseStellarAddressList_(row[16]);
-    const issuers = parseStellarAddressList_(row[17]);
+    // По умолчанию: Q=Account_s (16), R=Asset_issuer (17)
+    const accounts = parseStellarAddressList_(row[residentCols.accountsIdx]);
+    const issuers = parseStellarAddressList_(row[residentCols.issuersIdx]);
 
     for (const a of accounts) {
       if (accountToProjectIds[a]) {
@@ -1312,6 +1314,15 @@ function parseStellarAddressList_(value) {
     .split(/[,;]/)
     .map(function (item) { return String(item || '').trim(); })
     .filter(function (item) { return item.startsWith('G'); });
+}
+
+function resolveResidentsColumnIndexes_(headers) {
+  const fallback = { labelIdx: 1, accountsIdx: 16, issuersIdx: 17 };
+  const core = getDomainCore_();
+  if (typeof core.resolveResidentsColumnIndexes === 'function') {
+    return core.resolveResidentsColumnIndexes(headers, fallback);
+  }
+  return fallback;
 }
 
 function fetchAllPayments(baseUrl, fundKey, endDate, log) {

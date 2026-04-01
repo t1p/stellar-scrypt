@@ -1221,11 +1221,19 @@ function resolveLabel(addr, acc, fundAccounts, res, bsn) {
 }
 
 function isFund(addr, fundAccounts) {
-  return Object.values(fundAccounts).includes(String(addr).trim());
+  const core = getDomainCore_();
+  if (typeof core.isFundAddress === 'function') {
+    return core.isFundAddress(addr, fundAccounts);
+  }
+  return Object.values(fundAccounts || {}).includes(String(addr || '').trim());
 }
 
 function isResident(addr, residentsMap) {
-  return String(addr).trim() in residentsMap;
+  const core = getDomainCore_();
+  if (typeof core.isResidentAddress === 'function') {
+    return core.isResidentAddress(addr, residentsMap);
+  }
+  return String(addr || '').trim() in (residentsMap || {});
 }
 
 function normalizeTokenPart(value) {

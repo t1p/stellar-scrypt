@@ -153,12 +153,22 @@
     return txHash;
   }
 
+  function isFundAddress(addr, fundAccounts) {
+    return Object.values(fundAccounts || {}).includes(String(addr || '').trim());
+  }
+
+  function isResidentAddress(addr, residentsMap) {
+    return String(addr || '').trim() in (residentsMap || {});
+  }
+
   const api = {
     normalizeAssetKey,
     parseTokenFilter,
     classifyTransfer,
     mapProjectIdForTransfer,
-    parseTxHashFromCell
+    parseTxHashFromCell,
+    isFundAddress,
+    isResidentAddress
   };
 
   if (typeof module !== 'undefined' && module.exports) {

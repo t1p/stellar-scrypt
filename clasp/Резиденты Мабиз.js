@@ -1325,6 +1325,16 @@ function resolveResidentsColumnIndexes_(headers) {
   return fallback;
 }
 
+function addressListContains_(value, targetAddress) {
+  const core = getDomainCore_();
+  if (typeof core.addressListContains === 'function') {
+    return core.addressListContains(value, targetAddress);
+  }
+  const target = String(targetAddress || '').trim();
+  if (!target) return false;
+  return parseStellarAddressList_(value).includes(target);
+}
+
 function fetchAllPayments(baseUrl, fundKey, endDate, log) {
   const out = [];
   let next = baseUrl;
@@ -2013,7 +2023,7 @@ function updateResidentsFromTasks(tasks) {
       // Но поскольку mapping имеет stellar_account, найдем по нему
 
       const accountColIdx = headers.indexOf('Account_s'); // Предполагаем колонку Account_s
-      if (accountColIdx !== -1 && row[accountColIdx] && String(row[accountColIdx]).trim() === mapping.stellar_account) {
+      if (accountColIdx !== -1 && addressListContains_(row[accountColIdx], mapping.stellar_account)) {
         residentRowIdx = i;
         break;
       }

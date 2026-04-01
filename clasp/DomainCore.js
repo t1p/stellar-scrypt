@@ -164,6 +164,12 @@
       .filter(function (item) { return item.startsWith('G'); });
   }
 
+  function addressListContains(value, targetAddress) {
+    const target = String(targetAddress || '').trim();
+    if (!target) return false;
+    return parseStellarAddressList(value).includes(target);
+  }
+
   function normalizeHeaderKey(value) {
     return String(value || '')
       .trim()
@@ -231,6 +237,7 @@
     mapProjectIdForTransfer,
     parseTxHashFromCell,
     parseStellarAddressList,
+    addressListContains,
     resolveResidentsColumnIndexes,
     isFundAddress,
     isResidentAddress,

@@ -94,14 +94,34 @@
 
 ### 4) Построение отчётных витрин
 
-16. **Собрать FACT_MONTHLY** → [`buildFactMonthly()`](clasp/Резиденты%20Мабиз.js:2276)
+#### Resident Tracking витрины
+
+16. **Собрать RESIDENT_TIMELINE** → [`buildResidentTimeline()`](clasp/Резиденты%20Мабиз.js:1630)
+- Что делает: строит timeline read-model на основе `RESIDENT_TRACKING` с полями `entry_point_at`, `event_index`, `days_since_entry_point`.
+- Листы (читает/пишет): читает `RESIDENT_TRACKING`, пишет `RESIDENT_TIMELINE`.
+- Побочные эффекты/длительность/ограничения: snapshot-пересборка (очистка + полная запись), проверяет обязательные заголовки источника.
+- Признак успеха: заполненный `RESIDENT_TIMELINE` и запись этапа `buildResidentTimeline` в `DEBUG_LOG`.
+
+17. **Собрать TOKEN_FLOWS** → [`buildTokenFlows()`](clasp/Резиденты%20Мабиз.js:1750)
+- Что делает: строит snapshot потоков токенов (агрегированные ребра движения) из `RESIDENT_TRACKING`.
+- Листы (читает/пишет): читает `RESIDENT_TRACKING`, пишет `TOKEN_FLOWS`.
+- Побочные эффекты/длительность/ограничения: snapshot-пересборка, дедуп по `tx_hash`, встроенные safeguards на размер входа/выхода.
+- Признак успеха: заполненный `TOKEN_FLOWS` и запись этапа `buildTokenFlows` в `DEBUG_LOG`.
+
+18. **Собрать ISSUER_STRUCTURE** → [`buildIssuerStructure()`](clasp/Резиденты%20Мабиз.js:1865)
+- Что делает: строит foundation snapshot структуры взаимодействий (направленные связи `from -> to`) из `RESIDENT_TRACKING`.
+- Листы (читает/пишет): читает `RESIDENT_TRACKING`, пишет `ISSUER_STRUCTURE`.
+- Побочные эффекты/длительность/ограничения: snapshot-пересборка, требует обязательные колонки источника.
+- Признак успеха: заполненный `ISSUER_STRUCTURE` и запись этапа `buildIssuerStructure` в `DEBUG_LOG`.
+
+19. **Собрать FACT_MONTHLY** → [`buildFactMonthly()`](clasp/Резиденты%20Мабиз.js:2937)
 - Что делает: агрегирует факты из `TRANSFERS` в помесячный срез `FACT_MONTHLY`.
 - Листы (читает/пишет): читает `TRANSFERS`, пишет `FACT_MONTHLY`.
 - Побочные эффекты/длительность/ограничения: обычно очищает/перезаписывает целевой диапазон при пересборке.
 - Типичные проблемы: пустой `TRANSFERS` или отсутствующие обязательные колонки.
 - Признак успеха: заполненные строки `FACT_MONTHLY` и запись в `DEBUG_LOG`.
 
-17. **Собрать KPI_RAW** → [`buildKpiRaw()`](clasp/Резиденты%20Мабиз.js:2406)
+20. **Собрать KPI_RAW** → [`buildKpiRaw()`](clasp/Резиденты%20Мабиз.js:3067)
 - Что делает: считает базовые KPI по текущим данным.
 - Листы (читает/пишет): читает `RESIDENTS`, `TRANSFERS`, пишет `KPI_RAW`.
 - Побочные эффекты/длительность/ограничения: результат зависит от полноты `RESIDENTS` и свежести `TRANSFERS`.
@@ -110,21 +130,21 @@
 
 ### 5) Интеграция с ClickUp
 
-18. **ClickUp Инвентаризация** → [`clickupInventory()`](clasp/Резиденты%20Мабиз.js:1599)
+21. **ClickUp Инвентаризация** → [`clickupInventory()`](clasp/Резиденты%20Мабиз.js:2260)
 - Что делает: загружает структуру workspace (spaces/folders/lists/users/статусы/поля) в `CLICKUP_SCHEMA`.
 - Листы (читает/пишет): читает `CONST`, пишет `CLICKUP_SCHEMA`.
 - Побочные эффекты/длительность/ограничения: делает внешние API-запросы к ClickUp (через цепочку функций), время зависит от размера workspace.
 - Типичные проблемы: отсутствует `CLICKUP_API_KEY` или `CLICKUP_WORKSPACE_ID` в `CONST`.
 - Признак успеха: `CLICKUP_SCHEMA` заполнен и в `DEBUG_LOG` есть этап `clickupInventory`.
 
-19. **Синхронизация задач ClickUp** → [`syncClickUpTasks()`](clasp/Резиденты%20Мабиз.js:1754)
+22. **Синхронизация задач ClickUp** → [`syncClickUpTasks()`](clasp/Резиденты%20Мабиз.js:2415)
 - Что делает: подтягивает задачи из заданных списков и обновляет `CLICKUP_TASKS`; затем вызывает обновление резидентов.
 - Листы (читает/пишет): читает `CONST`, пишет `CLICKUP_TASKS`, использует `ANOMALIES` и вызывает [`updateResidentsFromTasks()`](clasp/Резиденты%20Мабиз.js:1873).
 - Побочные эффекты/длительность/ограничения: требует `CLICKUP_LIST_IDS`; при отсутствии кидает ошибку [`CLICKUP_LIST_IDS не заданы в CONST листе`](clasp/Резиденты%20Мабиз.js:1772).
 - Типичные проблемы: недействительный API-ключ, пустой список list IDs, несоответствие пользовательских полей.
 - Признак успеха: обновились строки в `CLICKUP_TASKS` и связанные поля в `RESIDENTS`.
 
-20. **Обновить резидентов из ClickUp** → [`updateResidentsFromTasks()`](clasp/Резиденты%20Мабиз.js:1873)
+23. **Обновить резидентов из ClickUp** → [`updateResidentsFromTasks()`](clasp/Резиденты%20Мабиз.js:2534)
 - Что делает: переносит данные задач (куратор, даты действий/платежей и т.п.) в `RESIDENTS`.
 - Листы (читает/пишет): читает `PROJECT_MAP`, пишет `RESIDENTS`.
 - Побочные эффекты/длительность/ограничения: функция ожидает входной массив задач; из меню вызывается без аргумента, поэтому практическая ценность — как часть [`syncClickUpTasks()`](clasp/Резиденты%20Мабиз.js:1754).
@@ -133,9 +153,9 @@
 
 ### 6) Апгрейд структуры листов
 
-21. **Апгрейд листа TRANSFERS** → [`upgradeTransfersSheet()`](clasp/Резиденты%20Мабиз.js:2558)
-22. **Апгрейд листа RESIDENTS** → [`upgradeResidentsSheet()`](clasp/Резиденты%20Мабиз.js:2580)
-23. **Апгрейд всех листов** → [`upgradeExistingSheets()`](clasp/Резиденты%20Мабиз.js:2602)
+24. **Апгрейд листа TRANSFERS** → [`upgradeTransfersSheet()`](clasp/Резиденты%20Мабиз.js:3224)
+25. **Апгрейд листа RESIDENTS** → [`upgradeResidentsSheet()`](clasp/Резиденты%20Мабиз.js:3246)
+26. **Апгрейд всех листов** → [`upgradeExistingSheets()`](clasp/Резиденты%20Мабиз.js:3268)
 
 Для этих пунктов:
 - Что делают: добавляют недостающие колонки и приводят листы к ожидаемой схеме.

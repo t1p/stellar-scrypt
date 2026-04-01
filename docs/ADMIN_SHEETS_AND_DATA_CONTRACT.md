@@ -205,6 +205,51 @@
 | **Режим** | Snapshot overwrite |
 | **Ручное редактирование** | ❌ Нет (автоматика) |
 
+### RESIDENT_TRACKING
+
+| Параметр | Значение |
+|----------|----------|
+| **Назначение** | Базовый resident-centric snapshot взаимодействий по данным `TRANSFERS` + `RESIDENTS` |
+| **Создаёт** | [`syncResidentTracking()`](clasp/Резиденты%20Мабиз.js:1516) |
+| **Читает** | [`buildResidentTimeline()`](clasp/Резиденты%20Мабиз.js:1630), [`buildTokenFlows()`](clasp/Резиденты%20Мабиз.js:1750), [`buildIssuerStructure()`](clasp/Резиденты%20Мабиз.js:1865) |
+| **Пишет** | [`syncResidentTracking()`](clasp/Резиденты%20Мабиз.js:1516) |
+| **Режим** | Snapshot overwrite |
+| **Ручное редактирование** | ❌ Нет |
+| **Критичные заголовки** | `datetime`, `project_id`, `resident_address`, `from`, `to`, `asset_code`, `asset_issuer`, `amount`, `direction`, `tx_hash` |
+
+### RESIDENT_TIMELINE
+
+| Параметр | Значение |
+|----------|----------|
+| **Назначение** | Timeline read-model по резиденту: `entry_point_at`, `event_index`, `days_since_entry_point` |
+| **Создаёт** | [`buildResidentTimeline()`](clasp/Резиденты%20Мабиз.js:1630) |
+| **Читает** | — (витрина) |
+| **Пишет** | [`buildResidentTimeline()`](clasp/Резиденты%20Мабиз.js:1630) |
+| **Режим** | Snapshot overwrite |
+| **Ручное редактирование** | ❌ Нет |
+
+### TOKEN_FLOWS
+
+| Параметр | Значение |
+|----------|----------|
+| **Назначение** | Foundation snapshot потоков токенов (агрегированные ребра движения) |
+| **Создаёт** | [`buildTokenFlows()`](clasp/Резиденты%20Мабиз.js:1750) |
+| **Читает** | — (витрина) |
+| **Пишет** | [`buildTokenFlows()`](clasp/Резиденты%20Мабиз.js:1750) |
+| **Режим** | Snapshot overwrite |
+| **Ручное редактирование** | ❌ Нет |
+
+### ISSUER_STRUCTURE
+
+| Параметр | Значение |
+|----------|----------|
+| **Назначение** | Foundation snapshot структуры взаимодействий эмитента/фонда с резидентом |
+| **Создаёт** | [`buildIssuerStructure()`](clasp/Резиденты%20Мабиз.js:1865) |
+| **Читает** | — (витрина) |
+| **Пишет** | [`buildIssuerStructure()`](clasp/Резиденты%20Мабиз.js:1865) |
+| **Режим** | Snapshot overwrite |
+| **Ручное редактирование** | ❌ Нет |
+
 ### DEBUG_LOG
 
 | Параметр | Значение |
@@ -232,6 +277,10 @@
 | ANOMALIES | [`remappingProjectIds()`](clasp/Резиденты%20Мабиз.js:1072) | [`mapProjectIdForTransfer_()`](clasp/Резиденты%20Мабиз.js:892), [`syncClickUpTasks()`](clasp/Резиденты%20Мабиз.js:1754) | Нет критичных рисков |
 | FACT_MONTHLY | — | [`buildFactMonthly()`](clasp/Резиденты%20Мабиз.js:2276) | Перезаписывается полностью |
 | KPI_RAW | — | [`buildKpiRaw()`](clasp/Резиденты%20Мабиз.js:2406) | Перезаписывается полностью |
+| RESIDENT_TRACKING | [`buildResidentTimeline()`](clasp/Резиденты%20Мабиз.js:1630), [`buildTokenFlows()`](clasp/Резиденты%20Мабиз.js:1750), [`buildIssuerStructure()`](clasp/Резиденты%20Мабиз.js:1865) | [`syncResidentTracking()`](clasp/Резиденты%20Мабиз.js:1516) | Ошибка схемы ломает downstream витрины |
+| RESIDENT_TIMELINE | — | [`buildResidentTimeline()`](clasp/Резиденты%20Мабиз.js:1630) | Перезаписывается полностью |
+| TOKEN_FLOWS | — | [`buildTokenFlows()`](clasp/Резиденты%20Мабиз.js:1750) | Перезаписывается полностью |
+| ISSUER_STRUCTURE | — | [`buildIssuerStructure()`](clasp/Резиденты%20Мабиз.js:1865) | Перезаписывается полностью |
 | DEBUG_LOG | Администратор | Все функции | Нет критичных рисков |
 
 ## Связанные документы

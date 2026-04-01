@@ -317,7 +317,17 @@ function syncStellarTransfers() {
       }
 
       let scopeAllowed = false;
-      if (counterpartyScope === 'FUND_RESIDENT_ONLY') {
+      const core = getDomainCore_();
+      if (typeof core.evaluateCounterpartyScope === 'function') {
+        scopeAllowed = core.evaluateCounterpartyScope(counterpartyScope, {
+          fromIsFund,
+          toIsFund,
+          fromIsRes,
+          toIsRes
+        }, {
+          relaxRoleFilter
+        });
+      } else if (counterpartyScope === 'FUND_RESIDENT_ONLY') {
         scopeAllowed = (fromIsRes && toIsFund) || (fromIsFund && toIsRes);
         if (!scopeAllowed && relaxRoleFilter && (fromIsFund || toIsFund)) {
           scopeAllowed = true;

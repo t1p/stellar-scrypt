@@ -165,6 +165,30 @@
     return String(addr || '').trim() in (residentsMap || {});
   }
 
+  function evaluateCounterpartyScope(counterpartyScope, flags, options) {
+    const f = flags || {};
+    const fromIsFund = Boolean(f.fromIsFund);
+    const toIsFund = Boolean(f.toIsFund);
+    const fromIsRes = Boolean(f.fromIsRes);
+    const toIsRes = Boolean(f.toIsRes);
+    const relaxRoleFilter = Boolean(options && options.relaxRoleFilter);
+
+    if (counterpartyScope === 'FUND_RESIDENT_ONLY') {
+      const strictMatch = (fromIsRes && toIsFund) || (fromIsFund && toIsRes);
+      return strictMatch || (relaxRoleFilter && (fromIsFund || toIsFund));
+    }
+    if (counterpartyScope === 'FUND_FUND') {
+      return fromIsFund && toIsFund;
+    }
+    if (counterpartyScope === 'RESIDENT_RESIDENT') {
+      return fromIsRes && toIsRes;
+    }
+    if (counterpartyScope === 'ALL_RELEVANT') {
+      return fromIsFund || toIsFund || fromIsRes || toIsRes;
+    }
+    return (fromIsRes && toIsFund) || (fromIsFund && toIsRes);
+  }
+
   const api = {
     normalizeAssetKey,
     normalizeTokenPart,
@@ -173,7 +197,8 @@
     mapProjectIdForTransfer,
     parseTxHashFromCell,
     isFundAddress,
-    isResidentAddress
+    isResidentAddress,
+    evaluateCounterpartyScope
   };
 
   if (typeof module !== 'undefined' && module.exports) {

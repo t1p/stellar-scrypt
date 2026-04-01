@@ -3204,6 +3204,9 @@ function initializeNewSheets() {
   initializeAnomalies();
   initializeFactMonthly();
   initializeKpiRaw();
+  initializeResidentTimeline();
+  initializeTokenFlows();
+  initializeIssuerStructure();
   writeDebugLog({
     timestamp: new Date().toISOString(),
     stage: 'initializeNewSheets',
@@ -3263,6 +3266,9 @@ function upgradeExistingSheets() {
   upgradeTransfersSheet();
   upgradeResidentsSheet();
   upgradeDebugLogSheet();
+  initializeResidentTimeline();
+  initializeTokenFlows();
+  initializeIssuerStructure();
 }
 
 function ping() {

@@ -15,6 +15,10 @@
     return `${code}:${issuer}`;
   }
 
+  function normalizeTokenPart(value) {
+    return String(value || '').trim().toUpperCase();
+  }
+
   function parseTokenFilter(rawValue) {
     const raw = String(rawValue || '').trim();
     if (!raw) return { raw: '', norm: '', code: '', issuer: '', hasIssuer: false };
@@ -163,6 +167,7 @@
 
   const api = {
     normalizeAssetKey,
+    normalizeTokenPart,
     parseTokenFilter,
     classifyTransfer,
     mapProjectIdForTransfer,

@@ -1237,6 +1237,10 @@ function isResident(addr, residentsMap) {
 }
 
 function normalizeTokenPart(value) {
+  const core = getDomainCore_();
+  if (typeof core.normalizeTokenPart === 'function') {
+    return core.normalizeTokenPart(value);
+  }
   return String(value || '').trim().toUpperCase();
 }
 

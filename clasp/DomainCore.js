@@ -397,6 +397,96 @@
     return out;
   }
 
+  function buildTokenFlowSnapshot(trackingRows, options) {
+    const list = Array.isArray(trackingRows) ? trackingRows : [];
+    const opts = options || {};
+    const maxInputRows = Number(opts.maxInputRows || 0);
+    const limit = maxInputRows > 0 ? Math.min(maxInputRows, list.length) : list.length;
+    const acc = {};
+
+    for (let i = 0; i < limit; i++) {
+      const row = list[i] || {};
+      const datetime = toDate_(row.datetime);
+      if (!datetime) continue;
+
+      const projectId = String(row.project_id || '').trim();
+      const residentAddress = String(row.resident_address || '').trim();
+      const from = String(row.from || '').trim();
+      const to = String(row.to || '').trim();
+      const direction = String(row.direction || '').trim().toUpperCase();
+      const assetCode = String(row.asset_code || '').trim().toUpperCase();
+      const assetIssuer = String(row.asset_issuer || '').trim();
+      const txHash = String(row.tx_hash || '').trim();
+      const amount = Number(row.amount || 0);
+
+      if (!projectId || !residentAddress || !from || !to || !assetCode) continue;
+
+      const key = [projectId, residentAddress, assetCode, assetIssuer, direction, from, to].join('|');
+      if (!acc[key]) {
+        acc[key] = {
+          project_id: projectId,
+          resident_label: String(row.resident_label || '').trim(),
+          resident_address: residentAddress,
+          asset_code: assetCode,
+          asset_issuer: assetIssuer,
+          direction,
+          from,
+          to,
+          tx_count: 0,
+          total_amount: 0,
+          first_seen_at: datetime,
+          last_seen_at: datetime,
+          _hashes: {}
+        };
+      }
+
+      const item = acc[key];
+      if (datetime.getTime() < item.first_seen_at.getTime()) item.first_seen_at = datetime;
+      if (datetime.getTime() > item.last_seen_at.getTime()) item.last_seen_at = datetime;
+
+      if (txHash) {
+        if (!item._hashes[txHash]) {
+          item._hashes[txHash] = true;
+          item.tx_count += 1;
+        }
+      } else {
+        item.tx_count += 1;
+      }
+      item.total_amount += amount;
+    }
+
+    const out = Object.keys(acc).map(function (key) {
+      const row = acc[key];
+      return {
+        project_id: row.project_id,
+        resident_label: row.resident_label,
+        resident_address: row.resident_address,
+        asset_code: row.asset_code,
+        asset_issuer: row.asset_issuer,
+        direction: row.direction,
+        from: row.from,
+        to: row.to,
+        tx_count: row.tx_count,
+        total_amount: row.total_amount,
+        first_seen_at: row.first_seen_at,
+        last_seen_at: row.last_seen_at
+      };
+    });
+
+    out.sort(function (a, b) {
+      if (a.project_id !== b.project_id) return a.project_id < b.project_id ? -1 : 1;
+      if (a.resident_address !== b.resident_address) return a.resident_address < b.resident_address ? -1 : 1;
+      if (a.asset_code !== b.asset_code) return a.asset_code < b.asset_code ? -1 : 1;
+      return a.first_seen_at.getTime() - b.first_seen_at.getTime();
+    });
+
+    const maxOutputRows = Number(opts.maxOutputRows || 0);
+    if (maxOutputRows > 0 && out.length > maxOutputRows) {
+      return out.slice(0, maxOutputRows);
+    }
+    return out;
+  }
+
   const api = {
     normalizeAssetKey,
     normalizeTokenPart,
@@ -411,7 +501,8 @@
     isResidentAddress,
     evaluateCounterpartyScope,
     buildResidentTrackingDataset,
-    buildResidentTimelineReadModel
+    buildResidentTimelineReadModel,
+    buildTokenFlowSnapshot
   };
 
   if (typeof module !== 'undefined' && module.exports) {

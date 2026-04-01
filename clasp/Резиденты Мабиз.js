@@ -19,6 +19,7 @@ const SHEET_FACT_MONTHLY = 'FACT_MONTHLY';
 const SHEET_KPI_RAW = 'KPI_RAW';
 const SHEET_RESIDENT_TRACKING = 'RESIDENT_TRACKING';
 const SHEET_RESIDENT_TIMELINE = 'RESIDENT_TIMELINE';
+const SHEET_TOKEN_FLOWS = 'TOKEN_FLOWS';
 
 const MEMO_CACHE_TTL = 21600; // 6 часов
 const MAX_MEMO_FETCH_PER_RUN = 300;
@@ -62,6 +63,7 @@ function onOpen() {
     .addItem('Инициализировать новые листы', 'initializeNewSheets')
     .addSeparator()
     .addItem('Собрать RESIDENT_TIMELINE', 'buildResidentTimeline')
+    .addItem('Собрать TOKEN_FLOWS', 'buildTokenFlows')
     .addSeparator()
     .addItem('Собрать FACT_MONTHLY', 'buildFactMonthly')
     .addItem('Собрать KPI_RAW', 'buildKpiRaw')
@@ -1431,6 +1433,14 @@ function buildResidentTimelineReadModel_(trackingRows, options) {
   return [];
 }
 
+function buildTokenFlowSnapshot_(trackingRows, options) {
+  const core = getDomainCore_();
+  if (typeof core.buildTokenFlowSnapshot === 'function') {
+    return core.buildTokenFlowSnapshot(trackingRows, options);
+  }
+  return [];
+}
+
 function readTransfersRowsAsObjects_(sheet) {
   if (!sheet || sheet.getLastRow() <= 1) return [];
   const values = sheet.getDataRange().getValues();
@@ -1688,6 +1698,103 @@ function buildResidentTimeline() {
     rows_read_tracking: sourceRows.length,
     rows_written_timeline: timelineRows.length,
     details: `Resident timeline built: ${timelineRows.length} rows`
+  });
+}
+
+function initializeTokenFlows() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(SHEET_TOKEN_FLOWS) || ss.insertSheet(SHEET_TOKEN_FLOWS);
+  if (sheet.getLastRow() === 0) {
+    sheet.appendRow([
+      'project_id',
+      'resident_label',
+      'resident_address',
+      'asset_code',
+      'asset_issuer',
+      'direction',
+      'from',
+      'to',
+      'tx_count',
+      'total_amount',
+      'first_seen_at',
+      'last_seen_at'
+    ]);
+    sheet.getRange('J:J').setNumberFormat('0,########');
+    sheet.getRange('K:L').setNumberFormat('dd-mm-yyyy hh:mm:ss');
+  }
+}
+
+function buildTokenFlows() {
+  const run_id = newRunId_();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const trackingSheet = ss.getSheetByName(SHEET_RESIDENT_TRACKING);
+  const tokenFlowsSheet = ss.getSheetByName(SHEET_TOKEN_FLOWS) || ss.insertSheet(SHEET_TOKEN_FLOWS);
+
+  initializeTokenFlows();
+
+  if (!trackingSheet || trackingSheet.getLastRow() <= 1) {
+    writeDebugLog({
+      run_id,
+      module: 'token_flow',
+      timestamp: new Date().toISOString(),
+      stage: 'buildTokenFlows',
+      fundKey: 'ERROR',
+      details: 'RESIDENT_TRACKING sheet is empty or not found'
+    });
+    return;
+  }
+
+  const trackingHeaders = trackingSheet.getRange(1, 1, 1, trackingSheet.getLastColumn()).getValues()[0].map(h => String(h || '').trim());
+  const requiredHeaders = ['datetime', 'project_id', 'resident_address', 'from', 'to', 'asset_code', 'asset_issuer', 'amount', 'direction', 'tx_hash'];
+  const missing = validateSheetHeaders_(trackingHeaders, requiredHeaders);
+  if (missing.length > 0) {
+    writeDebugLog({
+      run_id,
+      module: 'token_flow',
+      timestamp: new Date().toISOString(),
+      stage: 'buildTokenFlows',
+      fundKey: 'ERROR',
+      details: `Missing required columns in RESIDENT_TRACKING: ${missing.join(', ')}`
+    });
+    return;
+  }
+
+  const sourceRows = readSheetRowsAsObjects_(trackingSheet);
+  const flowRows = buildTokenFlowSnapshot_(sourceRows, {
+    maxInputRows: 100000,
+    maxOutputRows: 50000
+  });
+
+  tokenFlowsSheet.clearContents();
+  initializeTokenFlows();
+
+  if (flowRows.length > 0) {
+    const rows = flowRows.map((row) => [
+      row.project_id,
+      row.resident_label,
+      row.resident_address,
+      row.asset_code,
+      row.asset_issuer,
+      row.direction,
+      row.from,
+      row.to,
+      row.tx_count,
+      row.total_amount,
+      row.first_seen_at,
+      row.last_seen_at
+    ]);
+    tokenFlowsSheet.getRange(2, 1, rows.length, rows[0].length).setValues(rows);
+  }
+
+  writeDebugLog({
+    run_id,
+    module: 'token_flow',
+    timestamp: new Date().toISOString(),
+    stage: 'buildTokenFlows',
+    fundKey: 'SUCCESS',
+    rows_read_tracking: sourceRows.length,
+    rows_written_token_flows: flowRows.length,
+    details: `Token flows snapshot built: ${flowRows.length} rows`
   });
 }
 

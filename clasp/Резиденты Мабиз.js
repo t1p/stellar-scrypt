@@ -104,11 +104,7 @@ function getExistingTransferKeys(sheet) {
 
   for (const row of data) {
     const txCell = row[0] ? String(row[0]) : '';
-    const txHashMatch = txCell.match(/transactions\/(\w+)/) || txCell.match(/"([A-Z0-9]+)"\s*\)?$/i);
-    let txHash = txHashMatch ? txHashMatch[1] : '';
-    if (!txHash && /^[A-Z0-9]{10,}$/.test(txCell)) {
-      txHash = txCell;
-    }
+    const txHash = parseTxHashFromCell_(txCell);
     const opId = row[5] || '';
     if (txHash && opId) {
       existingKeys.add(`${txHash}:${opId}`);
@@ -683,8 +679,8 @@ function syncTransfersMemos() {
     const [memo, link] = data[i];
     
     // Если memo пустое И ссылка на транзакцию существует
-    if (!memo && String(link).includes('transactions/')) {
-      const hash = String(link).match(/transactions\/([A-Z0-9]+)/)?.[1];
+    if (!memo) {
+      const hash = parseTxHashFromCell_(link);
       if (hash && memoMap[hash] !== undefined) {
         // Обновляем memo, если оно было получено
         valuesToUpdate.push([memoMap[hash], link]);

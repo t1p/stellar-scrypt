@@ -1011,11 +1011,13 @@ function updateAccountCreationDetails() {
   const lastRow = accSheet.getLastRow();
   if (lastRow <= 1) return;
 
-  const headers = accSheet.getRange(1, 1, 1, accSheet.getLastColumn()).getValues()[0].map(h => String(h || '').trim());
-  const accountCol = headers.indexOf('account') !== -1 ? headers.indexOf('account') + 1 : 1;
-  const labelCol = headers.indexOf('label') !== -1 ? headers.indexOf('label') + 1 : 2;
-  const createdByCol = headers.indexOf('created_by') !== -1 ? headers.indexOf('created_by') + 1 : 3;
-  const createdAtCol = headers.indexOf('created_at') !== -1 ? headers.indexOf('created_at') + 1 : 4;
+  // В ACCOUNTS по контракту обновляем только E/F:
+  // E = Created by, F = Created data.
+  // Никакие другие колонки (в т.ч. C/D) не должны затрагиваться.
+  const accountCol = 1;
+  const labelCol = 2;
+  const createdByCol = 5;
+  const createdAtCol = 6;
 
   const constSheet = ss.getSheetByName(SHEET_CONST);
   const config = parseConstSheet(constSheet);

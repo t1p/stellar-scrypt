@@ -124,3 +124,19 @@ graph TD
 1.  Обновить `ADMIN_SHEETS_AND_DATA_CONTRACT.md`, добавив описание новых листов `RT_*`.
 2.  Создать `DEVELOPER_GUIDE.md` с описанием слоистой архитектуры и правил именования.
 3.  Обновить `USER_MENU.md` после внедрения новых пунктов меню.
+
+---
+
+## 11. Актуализация по фактически внедрённому operational flow
+
+В проекте зафиксирован обязательный порядок обновления RT-витрин:
+
+1. Обновление и нормализация `TRANSFERS`.
+2. Обязательный запуск [`syncResidentTracking()`](../clasp/Резиденты%20Мабиз.js) как единственного upstream для RT snapshots.
+3. Только после шага 2 запускать [`buildResidentTimeline()`](../clasp/Резиденты%20Мабиз.js), [`buildTokenFlows()`](../clasp/Резиденты%20Мабиз.js), [`buildIssuerStructure()`](../clasp/Резиденты%20Мабиз.js).
+
+Это устраняет неоднозначность, когда downstream витрины запускались без актуализации `RESIDENT_TRACKING`.
+
+Также в текущем scope добавлен account-metadata слой:
+- [`updateAccountCreationDetails()`](../clasp/Резиденты%20Мабиз.js) для enrichment листа `ACCOUNTS`;
+- [`syncAccountsMeta()`](../clasp/Резиденты%20Мабиз.js) для snapshots `ACCOUNTS_META` и `ACCOUNT_SIGNERS`.

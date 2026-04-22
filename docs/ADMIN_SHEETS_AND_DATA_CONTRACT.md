@@ -120,6 +120,30 @@
 | **Ручное редактирование** | ✅ Да |
 | **Критичные заголовки** | A (адрес), B (метка) |
 
+### ACCOUNTS_META
+
+| Параметр | Значение |
+|----------|----------|
+| **Назначение** | Snapshot метаданных аккаунтов (категория, секция, creator, thresholds) |
+| **Создаёт** | [`syncAccountsMeta()`](clasp/Резиденты%20Мабиз.js) |
+| **Читает** | — (служебная витрина) |
+| **Пишет** | [`syncAccountsMeta()`](clasp/Резиденты%20Мабиз.js) |
+| **Режим** | Snapshot overwrite |
+| **Ручное редактирование** | ❌ Нет |
+| **Критичные заголовки** | `category`, `section`, `account`, `created_by`, `created_at`, `low_threshold`, `med_threshold`, `high_threshold` |
+
+### ACCOUNT_SIGNERS
+
+| Параметр | Значение |
+|----------|----------|
+| **Назначение** | Snapshot подписантов аккаунтов с весами и типом |
+| **Создаёт** | [`syncAccountsMeta()`](clasp/Резиденты%20Мабиз.js) |
+| **Читает** | — (служебная витрина) |
+| **Пишет** | [`syncAccountsMeta()`](clasp/Резиденты%20Мабиз.js) |
+| **Режим** | Snapshot overwrite |
+| **Ручное редактирование** | ❌ Нет |
+| **Критичные заголовки** | `account`, `account_label`, `signer`, `signer_label`, `weight`, `type` |
+
 ### PROJECT_MAP
 
 | Параметр | Значение |
@@ -271,6 +295,8 @@
 | TRANSFERS | [`getExistingTransferKeys()`](clasp/Резиденты%20Мабиз.js:93), [`syncTransfersMemos()`](clasp/Резиденты%20Мабиз.js:621), [`buildFactMonthly()`](clasp/Резиденты%20Мабиз.js:2276) | [`appendNewRows()`](clasp/Резиденты%20Мабиз.js:138), [`syncTransfersMemos()`](clasp/Резиденты%20Мабиз.js:621) | Перестановка J/O → дубли, перестановка I/J → memo не обновляются |
 | TRANSFERS_MEMO_QUEUE | [`syncTransfersMemos()`](clasp/Резиденты%20Мабиз.js:621) | [`syncStellarTransfers()`](clasp/Резиденты%20Мабиз.js:149), [`syncTransfersMemos()`](clasp/Резиденты%20Мабиз.js:621) | Ручное изменение → сбой очереди |
 | ACCOUNTS | [`parseAccountsSheet()`](clasp/Резиденты%20Мабиз.js:765) | Администратор | Нет критичных рисков |
+| ACCOUNTS_META | — | [`syncAccountsMeta()`](clasp/Резиденты%20Мабиз.js) | Перезаписывается полностью |
+| ACCOUNT_SIGNERS | — | [`syncAccountsMeta()`](clasp/Резиденты%20Мабиз.js) | Перезаписывается полностью |
 | PROJECT_MAP | [`parseProjectMapSheet()`](clasp/Резиденты%20Мабиз.js:776), [`mapProjectIdForTransfer_()`](clasp/Резиденты%20Мабиз.js:892) | Администратор | Удаление колонок → не работает маппинг |
 | CLICKUP_SCHEMA | — | [`clickupInventory()`](clasp/Резиденты%20Мабиз.js:1599) | Перезаписывается полностью |
 | CLICKUP_TASKS | [`syncClickUpTasks()`](clasp/Резиденты%20Мабиз.js:1754) | [`syncClickUpTasks()`](clasp/Резиденты%20Мабиз.js:1754) | Перестановка G → потеря курсора, дубли |
@@ -282,6 +308,20 @@
 | TOKEN_FLOWS | — | [`buildTokenFlows()`](clasp/Резиденты%20Мабиз.js:1750) | Перезаписывается полностью |
 | ISSUER_STRUCTURE | — | [`buildIssuerStructure()`](clasp/Резиденты%20Мабиз.js:1865) | Перезаписывается полностью |
 | DEBUG_LOG | Администратор | Все функции | Нет критичных рисков |
+
+## Явная зависимость RT flow
+
+Downstream витрины:
+- [`buildResidentTimeline()`](clasp/Резиденты%20Мабиз.js)
+- [`buildTokenFlows()`](clasp/Резиденты%20Мабиз.js)
+- [`buildIssuerStructure()`](clasp/Резиденты%20Мабиз.js)
+
+обязательно зависят от актуального snapshot из [`syncResidentTracking()`](clasp/Резиденты%20Мабиз.js).
+
+Операционное правило:
+1. Сначала обновить `TRANSFERS` и его нормализацию (`memo`, remap, reclassify).
+2. Затем запускать только [`syncResidentTracking()`](clasp/Резиденты%20Мабиз.js).
+3. Только после этого пересобирать RT-витрины.
 
 ## Связанные документы
 

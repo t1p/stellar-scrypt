@@ -29,6 +29,8 @@
 | `ANOMALIES` | Аномалии маппинга | [`initializeAnomalies()`](clasp/Резиденты%20Мабиз.js:2231) |
 | `FACT_MONTHLY` | Агрегаты по месяцам | [`buildFactMonthly()`](clasp/Резиденты%20Мабиз.js:2276) |
 | `KPI_RAW` | Метрики KPI | [`buildKpiRaw()`](clasp/Резиденты%20Мабиз.js:2406) |
+| `ACCOUNTS_META` | Snapshot метаданных аккаунтов (пороги, created_by/created_at) | [`syncAccountsMeta()`](clasp/Резиденты%20Мабиз.js) |
+| `ACCOUNT_SIGNERS` | Snapshot подписантов аккаунтов | [`syncAccountsMeta()`](clasp/Резиденты%20Мабиз.js) |
 | `DEBUG_LOG` | Логи выполнения | Автоматически |
 
 ## Лист CONST: полная документация
@@ -76,6 +78,7 @@
 | `asset_blocklist` | Запрещённые активы | пусто | Чёрный список |
 | `min_amount` | Минимальная сумма | `0.01` | Фильтр по сумме |
 | `RELAX_ROLE_FILTER` | Ослабить фильтры | `false` | Менее строгие проверки |
+| `EXPLORER_TX_URL` | Базовый URL обозревателя для ссылок tx | вычисляется из `HORIZON_URL` | Используется в [`updateAccountCreationDetails()`](clasp/Резиденты%20Мабиз.js) |
 
 #### ClickUp
 
@@ -154,6 +157,28 @@ CLICKUP_LIST_IDS | 12345,67890
 1. Запустите **Обновить переводы** → [`syncStellarTransfers()`](clasp/Резиденты%20Мабиз.js:149)
 2. Проверьте `DEBUG_LOG` на наличие ошибок
 3. Убедитесь, что данные появились в `TRANSFERS`
+
+### Шаг 4: Синхронизация account metadata (опционально, но рекомендуется)
+
+1. Подготовьте лист `ACCOUNTS` c колонками `account`, `label` (или эквивалентом в первых двух колонках).
+2. Запустите [`updateAccountCreationDetails()`](clasp/Резиденты%20Мабиз.js) для заполнения `created_by`/`created_at` в `ACCOUNTS`.
+3. Запустите [`syncAccountsMeta()`](clasp/Резиденты%20Мабиз.js) для построения `ACCOUNTS_META` и `ACCOUNT_SIGNERS`.
+
+## Явный operational flow для Resident Tracking
+
+RT-витрины **не являются самостоятельным источником данных**. Их upstream — только [`syncResidentTracking()`](clasp/Резиденты%20Мабиз.js).
+
+Рекомендуемая последовательность полного обновления:
+1. [`syncStellarTransfers()`](clasp/Резиденты%20Мабиз.js)
+2. [`syncTransfersMemos()`](clasp/Резиденты%20Мабиз.js)
+3. [`remappingProjectIds()`](clasp/Резиденты%20Мабиз.js)
+4. [`reclassifyTransfers()`](clasp/Резиденты%20Мабиз.js)
+5. [`syncResidentTracking()`](clasp/Резиденты%20Мабиз.js)
+6. [`buildResidentTimeline()`](clasp/Резиденты%20Мабиз.js)
+7. [`buildTokenFlows()`](clasp/Резиденты%20Мабиз.js)
+8. [`buildIssuerStructure()`](clasp/Резиденты%20Мабиз.js)
+
+Если пропустить шаг 5, витрины `RESIDENT_TIMELINE`/`TOKEN_FLOWS`/`ISSUER_STRUCTURE` могут отражать устаревший или пустой state.
 
 ## Проверка конфигурации
 

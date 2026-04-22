@@ -77,6 +77,9 @@ function onOpen() {
     .addItem('Апгрейд листа TRANSFERS', 'upgradeTransfersSheet')
     .addItem('Апгрейд листа RESIDENTS', 'upgradeResidentsSheet')
     .addItem('Апгрейд всех листов', 'upgradeExistingSheets')
+    .addSeparator()
+    .addItem('Обновить Created данные аккаунтов', 'updateAccountCreationDetails')
+    .addItem('Обновить метаданные аккаунтов', 'syncAccountsMeta')
     .addToUi();
 }
 
@@ -187,7 +190,12 @@ function syncStellarTransfers() {
   }
 
   const config = parseConstSheet(constSheet);
-  const residentsMap = parseResidentsSheet(resSheet);
+  const residentsData = parseResidentsSheet(resSheet);
+  const residentsMap = {};
+  for (const r of residentsData) {
+    if (r.account) residentsMap[r.account] = r.label;
+    if (r.asset_issuer) residentsMap[r.asset_issuer] = r.label;
+  }
   const accountsLabelMap = parseAccountsSheet(accSheet);
   const bsnLabelMap = fetchBSNLabels();
   const fundAccounts = config.fundAccounts;
@@ -723,6 +731,7 @@ function parseConstSheet(sheet) {
     if (!key) continue;
     const strVal = String(val).trim();
     if (key === 'HORIZON_URL') config.HORIZON_URL = strVal;
+    else if (key === 'EXPLORER_TX_URL') config.EXPLORER_TX_URL = strVal;
     else if (key === 'START_DATE') config.START_DATE = strVal;
     else if (key === 'END_DATE') config.END_DATE = strVal;
     else if (key === 'TOKEN_FILTER') config.TOKEN_FILTER = strVal;
@@ -746,9 +755,123 @@ function parseConstSheet(sheet) {
   return config;
 }
 
+function normalizeExplorerBaseUrl_(baseUrl) {
+  let url = String(baseUrl || '').trim();
+  url = url.replace(/\/+$/g, '');
+  url = url.replace(/\/tx$/i, '').replace(/\/transactions$/i, '');
+  return url;
+}
+
+function buildExplorerTxUrl_(baseUrl, txHash) {
+  if (!txHash) return '';
+  const normalized = normalizeExplorerBaseUrl_(baseUrl);
+  if (!normalized) return '';
+  return `${normalized}/tx/${txHash}`;
+}
+
+function shortAccount_(address) {
+  const addr = String(address || '').trim();
+  if (!addr) return '';
+  if (addr.length <= 8) return addr;
+  return `${addr.slice(0, 4)}...${addr.slice(-4)}`;
+}
+
+function getExplorerBaseUrl_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const constSheet = ss.getSheetByName(SHEET_CONST);
+  const config = parseConstSheet(constSheet);
+  if (config.EXPLORER_TX_URL) {
+    return normalizeExplorerBaseUrl_(config.EXPLORER_TX_URL);
+  }
+  const horizon = config.HORIZON_URL || DEFAULT_HORIZON_URL;
+  return normalizeExplorerBaseUrl_(horizon.replace('/horizon', ''));
+}
+
+function getCreationTransactionDetails(accountId, horizonBaseUrl) {
+  const account = String(accountId || '').trim();
+  if (!account) return null;
+  const horizon = horizonBaseUrl || DEFAULT_HORIZON_URL;
+  const url = `${horizon}/accounts/${account}/transactions?order=asc&limit=1`;
+  try {
+    const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    if (res.getResponseCode() !== 200) {
+      if (DEBUG) Logger.log(`[getCreationTransactionDetails] Horizon error ${res.getResponseCode()} for ${account}`);
+      return null;
+    }
+    const json = JSON.parse(res.getContentText());
+    const record = json._embedded?.records?.[0];
+    if (!record) return null;
+    return {
+      creator: record.source_account || '',
+      createdAt: record.created_at ? new Date(record.created_at) : null,
+      txHash: record.hash || ''
+    };
+  } catch (e) {
+    if (DEBUG) Logger.log(`[getCreationTransactionDetails] Error for ${account}: ${e.toString()}`);
+    return null;
+  }
+}
+
+function formatCreationData(details, accountsMap, explorerBaseUrl) {
+  if (!details) return { createdBy: '', createdAt: '' };
+  const creator = String(details.creator || '').trim();
+  const label = accountsMap[creator] || shortAccount_(creator);
+  const txUrl = buildExplorerTxUrl_(explorerBaseUrl, details.txHash);
+  const link = txUrl ? `=HYPERLINK("${txUrl}"; "${label}")` : label;
+  return {
+    createdBy: link,
+    createdAt: details.createdAt || ''
+  };
+}
+
+function updateAccountCreationDetails() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const accSheet = ss.getSheetByName(SHEET_ACCOUNTS);
+  if (!accSheet) {
+    SpreadsheetApp.getUi().alert('Лист ACCOUNTS не найден.');
+    return;
+  }
+  const lastRow = accSheet.getLastRow();
+  if (lastRow <= 1) return;
+
+  const constSheet = ss.getSheetByName(SHEET_CONST);
+  const config = parseConstSheet(constSheet);
+  const horizon = config.HORIZON_URL || DEFAULT_HORIZON_URL;
+  const explorerBaseUrl = getExplorerBaseUrl_();
+
+  const accountsMap = parseAccountsSheet(accSheet);
+  const accountValues = accSheet.getRange(2, 1, lastRow - 1, 1).getValues();
+  const createdByValues = [];
+  const createdAtValues = [];
+
+  for (const row of accountValues) {
+    const accountId = String(row[0] || '').trim();
+    if (!accountId) {
+      createdByValues.push(['']);
+      createdAtValues.push(['']);
+      continue;
+    }
+    const details = getCreationTransactionDetails(accountId, horizon);
+    const formatted = formatCreationData(details, accountsMap, explorerBaseUrl);
+    createdByValues.push([formatted.createdBy]);
+    createdAtValues.push([formatted.createdAt]);
+  }
+
+  accSheet.getRange(2, 5, createdByValues.length, 1).setValues(createdByValues);
+  accSheet.getRange(2, 6, createdAtValues.length, 1).setValues(createdAtValues);
+  accSheet.getRange('F:F').setNumberFormat('dd-mm-yyyy hh:mm:ss');
+
+  writeDebugLog({
+    timestamp: new Date().toISOString(),
+    stage: 'updateAccountCreationDetails',
+    fundKey: 'ALL',
+    details: `Updated ${createdByValues.length} rows in ACCOUNTS`
+  });
+}
+
 function parseResidentsSheet(sheet) {
   const rows = sheet.getDataRange().getValues();
-  const map = {};
+  const residents = [];
   let totalAccounts = 0;
   let totalIssuers = 0;
   let skippedNoLabel = 0;
@@ -771,14 +894,17 @@ function parseResidentsSheet(sheet) {
     totalAccounts += accounts.length;
     totalIssuers += issuers.length;
 
-    for (const a of [...accounts, ...issuers]) {
-      if (a) map[a] = label;
+    for (const a of accounts) {
+      if (a) residents.push({ account: a, asset_issuer: '', label });
+    }
+    for (const iss of issuers) {
+      if (iss) residents.push({ account: '', asset_issuer: iss, label });
     }
   }
   if (DEBUG) {
-    Logger.log(`[parseResidentsSheet] rows=${rows.length - 1}, accounts=${totalAccounts}, issuers=${totalIssuers}, skippedNoLabel=${skippedNoLabel}, mapped=${Object.keys(map).length}`);
+    Logger.log(`[parseResidentsSheet] rows=${rows.length - 1}, accounts=${totalAccounts}, issuers=${totalIssuers}, skippedNoLabel=${skippedNoLabel}, residents=${residents.length}`);
   }
-  return map;
+  return residents;
 }
 
 function parseAccountsSheet(sheet) {
@@ -1214,25 +1340,30 @@ function fetchBSNLabels() {
 function resolveLabel(addr, acc, fundAccounts, res, bsn) {
   // Приоритет: ACCOUNTS > CONST > RESIDENTS > BSN JSON
   addr = String(addr).trim();
-  
+
   // 1. ACCOUNTS
   const accSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_ACCOUNTS);
   const accountsLabelMap = parseAccountsSheet(accSheet);
   if (accountsLabelMap[addr]) return accountsLabelMap[addr];
-  
+
   // 2. CONST (фондовые аккаунты)
   const fundKey = Object.keys(fundAccounts).find(k => fundAccounts[k] === addr);
   if (fundKey) return fundKey;
-  
+
   // 3. RESIDENTS
   const resSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_RESIDENTS);
-  const residentsMap = parseResidentsSheet(resSheet);
+  const residentsData = parseResidentsSheet(resSheet);
+  const residentsMap = {};
+  for (const r of residentsData) {
+    if (r.account) residentsMap[r.account] = r.label;
+    if (r.asset_issuer) residentsMap[r.asset_issuer] = r.label;
+  }
   if (residentsMap[addr]) return residentsMap[addr];
-  
+
   // 4. BSN JSON
   const bsnLabelMap = fetchBSNLabels();
   if (bsnLabelMap[addr]) return bsnLabelMap[addr];
-  
+
   return '';
 }
 
@@ -3269,6 +3400,175 @@ function upgradeExistingSheets() {
   initializeResidentTimeline();
   initializeTokenFlows();
   initializeIssuerStructure();
+}
+
+function syncAccountsMeta() {
+  const ss = SpreadsheetApp.getActive();
+  const config = parseConstSheet(ss.getSheetByName(SHEET_CONST));
+  const residents = parseResidentsSheet(ss.getSheetByName(SHEET_RESIDENTS));
+  const horizon = (config.HORIZON_URL || DEFAULT_HORIZON_URL).replace(/\/+$/, '');
+
+  // ===============================
+  // 1. Загружаем справочник лейблов
+  // ===============================
+
+  // ACCOUNTS: account → label (приоритет №1)
+  const accountLabels = parseAccountsSheet(ss.getSheetByName(SHEET_ACCOUNTS)); // { G... : 'LABEL' }
+
+  // fallback-лейблы из CONST и RESIDENTS
+  const fallbackLabels = {};
+
+  // из CONST (фонды)
+  for (const [key, val] of Object.entries(config.fundAccounts)) {
+    if (typeof val === 'string' && val.startsWith('G')) {
+      fallbackLabels[val.trim()] = key.trim();
+    }
+  }
+
+  // из RESIDENTS (label из B)
+  for (const r of residents) {
+    if (r.account && r.label) {
+      fallbackLabels[r.account.trim()] = r.label.trim();
+    }
+    if (r.asset_issuer && r.label) {
+      fallbackLabels[r.asset_issuer.trim()] = r.label.trim();
+    }
+  }
+
+  // универсальный резолвер лейблов
+  function getLabel(account) {
+    return (
+      accountLabels[account] ||
+      fallbackLabels[account] ||
+      ''
+    );
+  }
+
+  // ===============================
+  // 2. Подготавливаем листы
+  // ===============================
+
+  const sheetMeta = ss.getSheetByName('ACCOUNTS_META') || ss.insertSheet('ACCOUNTS_META');
+  const sheetSigners = ss.getSheetByName('ACCOUNT_SIGNERS') || ss.insertSheet('ACCOUNT_SIGNERS');
+
+  sheetMeta.clear();
+  sheetSigners.clear();
+
+  sheetMeta.appendRow([
+    'category',        // FUND / RESIDENT
+    'section',         // ключ CONST или label резидента
+    'account',
+    'created_by',
+    'created_at',
+    'low_threshold',
+    'med_threshold',
+    'high_threshold'
+  ]);
+
+  sheetSigners.appendRow([
+    'account',
+    'account_label',
+    'signer',
+    'signer_label',
+    'weight',
+    'type'
+  ]);
+
+  // ===============================
+  // 3. Формируем список аккаунтов
+  // ===============================
+
+  const accounts = [];
+
+  // фондовые аккаунты
+  for (const [key, val] of Object.entries(config.fundAccounts)) {
+    if (typeof val === 'string' && val.startsWith('G')) {
+      accounts.push({
+        category: 'FUND',
+        section: key.trim(),
+        account: val.trim()
+      });
+    }
+  }
+
+  // аккаунты резидентов
+  for (const r of residents) {
+    if (!r.account) continue;
+    accounts.push({
+      category: 'RESIDENT',
+      section: r.label || '',
+      account: r.account.trim()
+    });
+  }
+
+  // ===============================
+  // 4. Основной цикл по аккаунтам
+  // ===============================
+
+  for (const acc of accounts) {
+    const account = acc.account;
+
+    // ---- 4.1 Загружаем account info ----
+    const accResp = UrlFetchApp.fetch(
+      `${horizon}/accounts/${account}`,
+      { headers: { Accept: 'application/json' }, muteHttpExceptions: true }
+    );
+
+    Utilities.sleep(1000);
+
+    if (accResp.getResponseCode() !== 200) {
+      // аккаунт может быть архивный/удалённый — просто пропускаем
+      continue;
+    }
+
+    const accData = JSON.parse(accResp.getContentText());
+    const th = accData.thresholds || {};
+
+    // ---- 4.2 Подписанты ----
+    for (const s of accData.signers || []) {
+      sheetSigners.appendRow([
+        account,
+        getLabel(account),   // account_label
+        s.key,
+        getLabel(s.key),     // signer_label (через ACCOUNTS → CONST → RESIDENTS)
+        s.weight,
+        s.type
+      ]);
+    }
+
+    // ---- 4.3 Кто создал аккаунт и когда ----
+    let createdBy = '';
+    let createdAt = '';
+
+    const opsResp = UrlFetchApp.fetch(
+      `${horizon}/accounts/${account}/operations?order=asc&limit=1`,
+      { headers: { Accept: 'application/json' }, muteHttpExceptions: true }
+    );
+
+    // Добавляем задержку после запроса операций для соблюдения rate limits
+    Utilities.sleep(1000);
+
+    if (opsResp.getResponseCode() === 200) {
+      const ops = JSON.parse(opsResp.getContentText())._embedded?.records || [];
+      const createOp = ops.find(o => o.type === 'create_account');
+      if (createOp) {
+        createdBy = createOp.source_account || '';
+        createdAt = createOp.created_at || '';
+      }
+    }
+
+    // ---- 4.4 Запись в ACCOUNTS_META ----
+    sheetMeta.appendRow([
+      acc.category,
+      acc.section,
+      account,
+      createdBy,
+      createdAt,
+      th.low_threshold || 0,
+      th.med_threshold || 0,
+      th.high_threshold || 0
+    ]);
+  }
 }
 
 function ping() {

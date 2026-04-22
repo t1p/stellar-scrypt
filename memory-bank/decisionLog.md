@@ -1,13 +1,49 @@
 # Decision Log
 
 Этот файл записывает архитектурные и реализационные решения в формате списка.
-2026-03-31 23:08:56 - Последняя редакция базового описания.
+2026-04-22 14:25:07 - Последняя редакция базового описания.
 
 ## Правила редактирования
 
 * Записи в разделах должны быть отсортированы в обратном хронологическом порядке (самые новые сверху, старые внизу).
 * Каждая запись должна начинаться с даты редакции в формате ГГГГ-ММ-ДД ЧЧ:ММ:СС.
-2026-03-31 23:08:56 - Последняя редакция правил редактирования.
+2026-04-22 14:25:07 - Последняя редакция правил редактирования.
+
+## Решение: Shared Domain Core и GAS bridges для resident-tracking
+2026-04-22 14:25:07 - Решение: Развивать resident-tracking поверх общего foundation/domain core, а интеграцию с Google Apps Script и листами проводить через bridge-слой.
+### Обоснование
+* Resident-tracking use-cases переиспользуют общие foundation-построители, нормализацию и sheet contracts, поэтому изоляция RT в отдельный монолит создала бы дублирование и расхождение поведения.
+* Bridge pattern снижает связность между domain-логикой и GAS runtime, что упрощает доработку use-cases, документации и тестовой поверхности.
+### Детали реализации
+* Resident-tracking сценарии опираются на общий DomainCore и вызываются через GAS entrypoints, включая [`syncResidentTracking()`](clasp/Резиденты%20Мабиз.js:1505).
+* Меню в [`onOpen()`](clasp/Резиденты%20Мабиз.js:45) используется как orchestration boundary между пользовательским UI и bridge/use-case слоем.
+
+## Решение: Resident-tracking как snapshot/read-model pipeline
+2026-04-22 14:25:07 - Решение: Формировать resident-tracking витрины как набор snapshot/read-model builders, а не как прямую ad hoc аналитику по сырым данным.
+### Обоснование
+* RT-витрины требуют воспроизводимых, переиспользуемых представлений для timeline, token flows и issuer structure, а не одноразовых вычислений в UI.
+* Snapshot/read-model pipeline позволяет согласованно обновлять downstream листы, повторно использовать header contracts и упростить doc-sync по operational flow.
+### Детали реализации
+* В pipeline выделены специализированные builders: [`buildResidentTimeline()`](clasp/Резиденты%20Мабиз.js:1631), [`buildTokenFlows()`](clasp/Резиденты%20Мабиз.js:1737), [`buildIssuerStructure()`](clasp/Резиденты%20Мабиз.js:1832).
+* [`syncResidentTracking()`](clasp/Резиденты%20Мабиз.js:1505) закреплен как обязательный orchestration step, который обновляет upstream dataset и затем пересобирает downstream read-model листы.
+
+## Решение: Account-metadata как параллельный intelligence layer
+2026-04-22 14:25:07 - Решение: Держать account-metadata отдельно от resident-tracking read-models, используя его как параллельный intelligence layer для enrichment и последующей аналитики.
+### Обоснование
+* Account metadata меняется по своей траектории и не должен жестко смешиваться с RT snapshots, чтобы не ломать детерминированность витрин.
+* Параллельный intelligence layer позволяет обогащать RT-контур без потери прозрачности data lineage и без смешения upstream и downstream обязанностей.
+### Детали реализации
+* Интеграционный commit `a8864c4` закрепляет синхронизацию account metadata и выравнивание operational docs как актуальный source of truth.
+* RT pipeline использует account-metadata данные как дополнительный слой интерпретации, не заменяя foundation dataset и snapshot builders.
+
+## Решение: Обязательный upstream-step перед RT-витринами
+2026-04-22 14:25:07 - Решение: Считать resident-tracking витрины валидными только после обязательного обновления upstream dataset через [`syncResidentTracking()`](clasp/Резиденты%20Мабиз.js:1505).
+### Обоснование
+* Downstream views теряют консистентность, если строятся поверх устаревших foundation-данных, особенно при одновременной эволюции resident-tracking и account-metadata.
+* Фиксация обязательного upstream-step в документации и меню снижает риск ручных запусков в некорректной последовательности.
+### Детали реализации
+* Operational flow закреплен в меню и документации: upstream sync, bootstrap/validation листов, затем пересборка RT snapshots/read-models.
+* Source of truth для последовательности — реализованные use-cases и интеграционный commit `a8864c4`.
 
 ## Решение: Переход к слоистой архитектуре (Layered Architecture)
 2026-04-01 13:45:00 - Решение: Разделение монолита на Domain Core, Adapters и Orchestration.

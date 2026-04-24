@@ -2268,6 +2268,10 @@ function computeMaymunRowCountDelta(before, after) {
   return delta;
 }
 
+function getMaymunAssetLayerStatusSummary() {
+  return 'MAYMUN asset layer status: dry-run mode active; guardrails engaged (manual-only, write lock enforced)';
+}
+
 function runMaymunAssetLayerLimitedNonDryRun(options) {
   const opts = Object.assign({}, options || {});
   const runId = String(opts.runId || newRunId_());
@@ -2425,6 +2429,17 @@ function runMaymunAssetLayerLimitedNonDryRun(options) {
 }
 
 function runMaymunAssetLayerLimitedDryRun() {
+  const summary = getMaymunAssetLayerStatusSummary();
+  writeDebugLog({
+    run_id: newRunId_(),
+    module: 'maymun_asset_layer',
+    timestamp: stableNowIso_(),
+    stage: 'runMaymunAssetLayerLimitedDryRun.status',
+    fundKey: 'ALL',
+    details: summary
+  });
+  Logger.log(summary);
+
   return runMaymunAssetLayerLimitedNonDryRun({
     dryRun: true,
     allowNonDryRun: false,
@@ -4020,10 +4035,10 @@ function fetchTransactionsBetweenAddresses(fromAddr, toAddr, assetCode, assetIss
 
 // ========== Тестовая функция ==========
 function testFetchTransactionsBetweenAddresses() {
-  const fromAddr = 'GBGGX7QD3JCPFKOJTLBRAFU3SIME3WSNDXETWI63EDCORLBB6HIP2CRR'; // Binance USDC hot wallet
-  const toAddr = 'GCKCV7T56CAPFUYMCQUYSEUMZRC7GA7CAQ2BOL3RPS4NQXDTRCSULMFB'; // Known USDC holder
+  const fromAddr = 'GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
+  const toAddr = 'GYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY';
   const assetCode = 'EURMTL';
-  const assetIssuer = 'GACKTN5DAZGWXRWB2WLM6OPBDHAMT6SJNGLJZPQMEZBUR4JUGBX2UK7V'; // Centre issuer
+  const assetIssuer = 'GZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ';
   const startDate = new Date('2022-01-01T00:00:00Z');
   const endDate = new Date('2026-01-01T23:59:59Z');
   try {
@@ -4462,6 +4477,17 @@ function upgradeExistingSheets() {
 }
 
 function initializeMaymunAssetLayerSheetsManual() {
+  const summary = getMaymunAssetLayerStatusSummary();
+  writeDebugLog({
+    run_id: newRunId_(),
+    module: 'maymun_asset_layer',
+    timestamp: stableNowIso_(),
+    stage: 'initializeMaymunAssetLayerSheetsManual.status',
+    fundKey: 'ALL',
+    details: summary
+  });
+  Logger.log(summary);
+
   return ensureMaymunAssetLayerSheets({ dryRun: true, actor: 'manual_entrypoint' });
 }
 

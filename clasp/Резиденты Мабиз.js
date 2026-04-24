@@ -2318,6 +2318,12 @@ function getMaymunSheetSpecs_() {
 
 function assertManualUiContext_() {
   try {
+    // Check that we have an active user (excludes cron/triggers where user is empty)
+    const userEmail = Session.getActiveUser().getEmail();
+    if (!userEmail || userEmail.trim() === '') {
+      throw new Error('No active user detected');
+    }
+    // Verify UI is available (Apps Script editor or sheet menu context)
     const ui = SpreadsheetApp.getUi();
     if (!ui || typeof ui.alert !== 'function') {
       throw new Error('UI is unavailable');

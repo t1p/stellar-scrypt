@@ -84,6 +84,39 @@
 
 Проверяйте логи после каждого запуска для выявления фильтров или ошибок.
 
+## MAYMUN Asset Layer (MVP data/write)
+
+Добавлен минимальный data/write слой для листов `MAYMUN_*` по контракту MVP:
+
+* `MAYMUN_EVENTS`
+* `MAYMUN_DECISIONS`
+* `MAYMUN_ALLOCATIONS`
+* `MAYMUN_EXPENSES`
+* `MAYMUN_RUNWAY`
+
+Новые Apps Script функции:
+
+* `ensureMaymunAssetLayerSheets(options)`
+* `appendMaymunEvent(event, options)`
+* `upsertMaymunDecision(decision, options)`
+* `upsertMaymunAllocation(allocation, options)`
+* `appendMaymunExpense(expense, options)`
+* `appendMaymunRunwaySnapshot(snapshot, options)`
+
+Поддерживается dry-run режим через options вида:
+
+```js
+{ dryRun: true, actor: 'stellar-scrypt', runId: 'custom-run-id' }
+```
+
+Для быстрого прогона проверяемых dry-run сценариев используйте:
+
+* `ensureMaymunAssetLayerSheetsDryRun()`
+* `runMaymunAssetLayerDryRunHarness()`
+
+Идемпотентность transfer-backed events: дедуп по `tx_hash + op_id`.
+Все действия ensure/append/upsert (включая dry-run) логируются в `DEBUG_LOG` с `module: maymun_asset_layer`.
+
 ## Безопасность
 
 * **ClickUp токен**: Храните `CLICKUP_API_KEY` только в листе CONST. Не коммитите в репозиторий.

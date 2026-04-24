@@ -2209,6 +2209,225 @@ function runMaymunAssetLayerDryRunHarness() {
   };
 }
 
+function getMaymunAssetLayerRowCounts() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheetNames = [
+    SHEET_MAYMUN_EVENTS,
+    SHEET_MAYMUN_DECISIONS,
+    SHEET_MAYMUN_ALLOCATIONS,
+    SHEET_MAYMUN_EXPENSES,
+    SHEET_MAYMUN_RUNWAY
+  ];
+  const counts = {};
+
+  for (let i = 0; i < sheetNames.length; i++) {
+    const name = sheetNames[i];
+    const sheet = ss.getSheetByName(name);
+    if (!sheet) {
+      counts[name] = 0;
+      continue;
+    }
+    counts[name] = Math.max(0, sheet.getLastRow() - 1);
+  }
+
+  return counts;
+}
+
+function computeMaymunRowCountDelta(before, after) {
+  const b = before || {};
+  const a = after || {};
+  const allKeys = {};
+  Object.keys(b).forEach(function (k) { allKeys[k] = true; });
+  Object.keys(a).forEach(function (k) { allKeys[k] = true; });
+
+  const delta = {};
+  Object.keys(allKeys).forEach(function (k) {
+    const beforeCount = Number(b[k] || 0);
+    const afterCount = Number(a[k] || 0);
+    delta[k] = {
+      before: beforeCount,
+      after: afterCount,
+      delta: afterCount - beforeCount
+    };
+  });
+  return delta;
+}
+
+function runMaymunAssetLayerLimitedNonDryRun(options) {
+  const opts = Object.assign({}, options || {});
+  const runId = String(opts.runId || newRunId_());
+  const actor = String(opts.actor || 'owner_limited_runner');
+  const allowNonDryRun = opts.allowNonDryRun === true;
+  const dryRun = !allowNonDryRun;
+  const now = stableNowIso_();
+
+  writeDebugLog({
+    run_id: runId,
+    module: 'maymun_asset_layer',
+    timestamp: stableNowIso_(),
+    stage: 'runMaymunAssetLayerLimitedNonDryRun.start',
+    fundKey: 'ALL',
+    details: (dryRun ? '[DRY_RUN_DEFAULT] ' : '') + 'limited runner start'
+  });
+
+  if (!dryRun) {
+    writeDebugLog({
+      run_id: runId,
+      module: 'maymun_asset_layer',
+      timestamp: stableNowIso_(),
+      stage: 'runMaymunAssetLayerLimitedNonDryRun.owner_gate',
+      fundKey: 'OWNER_GATE',
+      details: 'OWNER_GATE_MARKER allowNonDryRun=true owner-approved limited run'
+    });
+  }
+
+  const writeOpts = { dryRun: dryRun, actor: actor, runId: runId };
+  const outputs = [];
+
+  outputs.push(ensureMaymunAssetLayerSheets(writeOpts));
+
+  const before = getMaymunAssetLayerRowCounts();
+  writeDebugLog({
+    run_id: runId,
+    module: 'maymun_asset_layer',
+    timestamp: stableNowIso_(),
+    stage: 'runMaymunAssetLayerLimitedNonDryRun.pre_counts',
+    fundKey: 'ALL',
+    details: JSON.stringify(before)
+  });
+
+  const confirmedEvent = {
+    source_type: 'transfer',
+    source_sheet: SHEET_TRANSFERS,
+    source_row: '1',
+    tx_hash: 'LIMITED_CONFIRMED_TX_001',
+    op_id: '1',
+    transfer_key: 'LIMITED_CONFIRMED_TX_001:1',
+    event_type: 'funding_received',
+    project_id: 'P1001',
+    resident_id: 'RESIDENT_P1001',
+    account_id: 'ACC_P1001',
+    asset_code: 'USDC',
+    asset_issuer: '',
+    amount: '100',
+    direction: 'in',
+    event_status: 'confirmed',
+    confidence: 'high',
+    occurred_at: now,
+    detected_at: now,
+    created_by: actor,
+    notes: 'Limited runner: confirmed transfer-backed event'
+  };
+  outputs.push(appendMaymunEvent(confirmedEvent, writeOpts));
+
+  const ambiguousEvent = {
+    source_type: 'transfer',
+    source_sheet: SHEET_TRANSFERS,
+    source_row: '2',
+    tx_hash: 'LIMITED_AMBIGUOUS_TX_001',
+    op_id: '1',
+    transfer_key: 'LIMITED_AMBIGUOUS_TX_001:1',
+    event_type: 'funding_received',
+    project_id: 'AMBIGUOUS',
+    resident_id: '',
+    account_id: '',
+    asset_code: 'USDC',
+    asset_issuer: '',
+    amount: '40',
+    direction: 'in',
+    event_status: 'manual_review',
+    confidence: 'low',
+    occurred_at: now,
+    detected_at: now,
+    created_by: actor,
+    notes: 'Limited runner: ambiguous case routed to manual review path'
+  };
+  outputs.push(appendMaymunEvent(ambiguousEvent, writeOpts));
+
+  const ambiguousEventId = buildMaymunEventId_(ambiguousEvent);
+  outputs.push(upsertMaymunDecision({
+    event_id: ambiguousEventId,
+    decision_type: 'manual_review',
+    decision_status: 'pending_approval',
+    policy_version: 'mvp_v1',
+    project_id: 'AMBIGUOUS',
+    resident_id: '',
+    amount: ambiguousEvent.amount,
+    asset_code: ambiguousEvent.asset_code,
+    requires_owner_go: 'TRUE',
+    owner_go_status: dryRun ? 'pending' : 'approved',
+    reason: 'Limited runner: manual review decision for ambiguous event',
+    notes: dryRun ? 'Dry-run owner GO preview' : 'Owner GO applied in guarded non-dry-run'
+  }, writeOpts));
+
+  outputs.push(appendMaymunRunwaySnapshot({
+    snapshot_at: now,
+    scope_type: 'global',
+    scope_id: 'limited_runner',
+    asset_code: 'USDC',
+    confirmed_balance: '100',
+    planned_inflow: '0',
+    planned_outflow: '40',
+    confirmed_expenses: '0',
+    net_confirmed_runway: '100',
+    forecast_runway: '60',
+    runway_days: '',
+    source_event_ids: [buildMaymunEventId_(confirmedEvent), ambiguousEventId].join(','),
+    source_allocation_ids: '',
+    source_expense_ids: '',
+    calculation_version: 'mvp_v1',
+    notes: 'Limited runner runway snapshot from confirmed plus manual-review backlog'
+  }, writeOpts));
+
+  const after = getMaymunAssetLayerRowCounts();
+  const delta = computeMaymunRowCountDelta(before, after);
+
+  writeDebugLog({
+    run_id: runId,
+    module: 'maymun_asset_layer',
+    timestamp: stableNowIso_(),
+    stage: 'runMaymunAssetLayerLimitedNonDryRun.post_counts',
+    fundKey: 'ALL',
+    details: JSON.stringify({ after: after, delta: delta })
+  });
+
+  writeDebugLog({
+    run_id: runId,
+    module: 'maymun_asset_layer',
+    timestamp: stableNowIso_(),
+    stage: 'runMaymunAssetLayerLimitedNonDryRun.complete',
+    fundKey: 'ALL',
+    details: (dryRun ? '[DRY_RUN_DEFAULT] ' : '') + 'limited runner completed'
+  });
+
+  return {
+    runId: runId,
+    dryRun: dryRun,
+    guardApplied: allowNonDryRun,
+    ownerGateMarkerLogged: !dryRun,
+    before: before,
+    after: after,
+    delta: delta,
+    outputs: outputs
+  };
+}
+
+function runMaymunAssetLayerLimitedDryRun() {
+  return runMaymunAssetLayerLimitedNonDryRun({
+    dryRun: true,
+    allowNonDryRun: false,
+    actor: 'ui_limited_dry_run'
+  });
+}
+
+function runMaymunAssetLayerLimitedNonDryRunGuarded() {
+  return runMaymunAssetLayerLimitedNonDryRun({
+    allowNonDryRun: true,
+    actor: 'owner_guarded_runner',
+    ownerGoContext: 'Owner GO: approved limited non-dry-run for one confirmed event + one ambiguous path + one manual review decision + one runway snapshot'
+  });
+}
+
 function normalizeTransferEventDedupeKey_(txHash, opId) {
   const tx = sanitizeForId_(txHash);
   const op = sanitizeForId_(opId);

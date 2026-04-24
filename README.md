@@ -84,6 +84,41 @@
 
 Проверяйте логи после каждого запуска для выявления фильтров или ошибок.
 
+## MAYMUN Asset Layer (owner-approved manual profile)
+
+MAYMUN-слой работает в двух режимах:
+
+* **Safe default**: global dry-run only (`normalizeOptions_` принудительно держит `dryRun=true` для обычных вызовов).
+* **Owner-approved manual write profile**: отдельный ручной entrypoint только для Apps Script UI/manual operator:
+  * `runMaymunAssetLayerOwnerApprovedWrite(options)`
+
+Листы и контракт остаются прежними:
+
+* `MAYMUN_EVENTS`
+* `MAYMUN_DECISIONS`
+* `MAYMUN_ALLOCATIONS`
+* `MAYMUN_EXPENSES`
+* `MAYMUN_RUNWAY`
+
+Ключевые ограничения (обязательны):
+
+* merge status: **HOLD**;
+* no cron;
+* no live ClickUp/Telegram projection;
+* no unattended CLI automation (`clasp run` путь не используется);
+* no runtime / credentials / provider wiring changes.
+
+Owner-approved write profile делает:
+
+1. owner marker в `DEBUG_LOG` (`fund_key=OWNER_GO`);
+2. precheck (row counts, наличие MAYMUN-листов, проверка заголовков, dry-run preview);
+3. ручной write-run из отдельного entrypoint;
+4. postcheck (row delta, DEBUG_LOG rows, список add/update, repeat/dedup check для `tx_hash + op_id`).
+
+Идемпотентность transfer-backed events сохраняется: дедуп по `tx_hash + op_id`.
+
+Rollback и пошаговый безопасный запуск описаны в [`docs/MAYMUN_OWNER_MANUAL_RUNBOOK.md`](docs/MAYMUN_OWNER_MANUAL_RUNBOOK.md).
+
 ## Безопасность
 
 * **ClickUp токен**: Храните `CLICKUP_API_KEY` только в листе CONST. Не коммитите в репозиторий.

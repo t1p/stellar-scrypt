@@ -186,6 +186,18 @@
 - Типичные проблемы: ручные нестандартные колонки в середине таблицы.
 - Признак успеха: появились нужные заголовки и зафиксирован этап в `DEBUG_LOG`.
 
+### 8) MAYMUN owner-approved manual profile
+
+30. **MAYMUN: Dry-run init/check листов** → [`initializeMaymunAssetLayerSheetsManual()`](clasp/Резиденты%20Мабиз.js)
+- Что делает: безопасный ручной dry-run ensure/check для `MAYMUN_*` листов без фактической записи.
+- Ограничения: только ручной запуск, non-dry write заблокирован общим guardrail.
+
+31. **MAYMUN: Owner-approved manual write profile** → [`runMaymunAssetLayerOwnerApprovedWrite()`](clasp/Резиденты%20Мабиз.js)
+- Что делает: отдельный owner-approved ручной профиль фактической записи в `MAYMUN_*` с обязательными precheck/postcheck.
+- Precheck: row counts, наличие листов, проверка заголовков, dry-run preview, подтверждение отдельного manual entrypoint.
+- Postcheck: row deltas, `DEBUG_LOG` rows, список add/update, repeat/dedup check по `tx_hash + op_id`.
+- Ограничения: только Apps Script UI/manual operator; не для cron, не для unattended CLI (`clasp run`), merge status остаётся hold.
+
 ## Рекомендуемый порядок запуска для новой таблицы
 
 1. Подготовить `CONST` (ключи Stellar/ClickUp) по требованиям из [`README.md`](README.md:23).

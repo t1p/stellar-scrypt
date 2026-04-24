@@ -229,6 +229,36 @@
     return (fromIsRes && toIsFund) || (fromIsFund && toIsRes);
   }
 
+  function normalizeTransferEventDedupeKey(txHash, opId) {
+    const tx = String(txHash || '').trim().toLowerCase();
+    const op = String(opId || '').trim().toLowerCase();
+    if (!tx || !op) return '';
+    return `${tx}:${op}`;
+  }
+
+  function buildMaymunEventId(event) {
+    const row = event || {};
+    const sourceType = String(row.source_type || '').trim().toLowerCase();
+    if (sourceType === 'transfer') {
+      const dedupeKey = normalizeTransferEventDedupeKey(row.tx_hash, row.op_id);
+      if (dedupeKey) return `evt_${dedupeKey.replace(':', '_')}`;
+    }
+    const seed = String(row.transfer_key || row.source_ref || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_');
+    return `evt_${seed || 'manual'}`;
+  }
+
+  function normalizeConfirmedAmount(allocationStatus, confirmedAmount) {
+    const status = String(allocationStatus || '').trim().toLowerCase();
+    const value = Number(confirmedAmount || 0);
+    if (status !== 'confirmed') return 0;
+    return value;
+  }
+
+  function hasUnconfirmedLiquidityMarkers(value) {
+    const text = String(value || '').toLowerCase();
+    return /pending|unconfirmed|ambiguous/.test(text);
+  }
+
   function toDate_(value) {
     if (value instanceof Date) {
       return isNaN(value.getTime()) ? null : value;
@@ -585,6 +615,10 @@
     isFundAddress,
     isResidentAddress,
     evaluateCounterpartyScope,
+    normalizeTransferEventDedupeKey,
+    buildMaymunEventId,
+    normalizeConfirmedAmount,
+    hasUnconfirmedLiquidityMarkers,
     buildResidentTrackingDataset,
     buildResidentTimelineReadModel,
     buildTokenFlowSnapshot,

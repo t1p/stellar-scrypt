@@ -24,6 +24,42 @@ const SHEET_ISSUER_STRUCTURE = 'ISSUER_STRUCTURE';
 const SHEET_ACCOUNTS_META = 'ACCOUNTS_META';
 const SHEET_ACCOUNT_SIGNERS = 'ACCOUNT_SIGNERS';
 
+const SHEET_MAYMUN_EVENTS = 'MAYMUN_EVENTS';
+const SHEET_MAYMUN_DECISIONS = 'MAYMUN_DECISIONS';
+const SHEET_MAYMUN_ALLOCATIONS = 'MAYMUN_ALLOCATIONS';
+const SHEET_MAYMUN_EXPENSES = 'MAYMUN_EXPENSES';
+const SHEET_MAYMUN_RUNWAY = 'MAYMUN_RUNWAY';
+
+const MAYMUN_EVENTS_HEADERS = [
+  'event_id', 'source_type', 'source_sheet', 'source_row', 'tx_hash', 'op_id', 'transfer_key',
+  'event_type', 'project_id', 'resident_id', 'account_id', 'asset_code', 'asset_issuer', 'amount',
+  'direction', 'event_status', 'confidence', 'occurred_at', 'detected_at', 'created_by', 'notes'
+];
+
+const MAYMUN_DECISIONS_HEADERS = [
+  'decision_id', 'event_id', 'decision_type', 'decision_status', 'policy_version', 'project_id',
+  'resident_id', 'amount', 'asset_code', 'requires_owner_go', 'owner_go_status', 'reason', 'created_at',
+  'updated_at', 'created_by', 'notes'
+];
+
+const MAYMUN_ALLOCATIONS_HEADERS = [
+  'allocation_id', 'decision_id', 'event_id', 'project_id', 'resident_id', 'bucket', 'allocation_type',
+  'allocation_status', 'asset_code', 'asset_issuer', 'amount', 'confirmed_amount', 'effective_at',
+  'created_at', 'updated_at', 'created_by', 'notes'
+];
+
+const MAYMUN_EXPENSES_HEADERS = [
+  'expense_id', 'source_type', 'source_ref', 'project_id', 'resident_id', 'vendor', 'category',
+  'expense_status', 'asset_code', 'amount', 'due_at', 'paid_at', 'recognized_at', 'created_at',
+  'updated_at', 'created_by', 'notes'
+];
+
+const MAYMUN_RUNWAY_HEADERS = [
+  'snapshot_id', 'snapshot_at', 'scope_type', 'scope_id', 'asset_code', 'confirmed_balance', 'planned_inflow',
+  'planned_outflow', 'confirmed_expenses', 'net_confirmed_runway', 'forecast_runway', 'runway_days',
+  'source_event_ids', 'source_allocation_ids', 'source_expense_ids', 'calculation_version', 'created_by', 'notes'
+];
+
 const MEMO_CACHE_TTL = 21600; // 6 часов
 const MAX_MEMO_FETCH_PER_RUN = 300;
 
@@ -79,6 +115,8 @@ function onOpen() {
     .addItem('Апгрейд листа TRANSFERS', 'upgradeTransfersSheet')
     .addItem('Апгрейд листа RESIDENTS', 'upgradeResidentsSheet')
     .addItem('Апгрейд всех листов', 'upgradeExistingSheets')
+    .addItem('MAYMUN: Dry-run init/check листов', 'initializeMaymunAssetLayerSheetsManual')
+    .addItem('MAYMUN: Owner-approved manual write profile', 'runMaymunAssetLayerOwnerApprovedWrite')
     .addSeparator()
     .addItem('Обновить Created данные аккаунтов', 'updateAccountCreationDetails')
     .addItem('Обновить метаданные аккаунтов', 'syncAccountsMeta')
@@ -1909,12 +1947,905 @@ function validateSheetHeaders_(headers, requiredHeaders) {
   const missing = [];
   const list = Array.isArray(headers) ? headers : [];
   const required = Array.isArray(requiredHeaders) ? requiredHeaders : [];
+  const normalized = list.map(normalizeHeaderKey_);
   for (let i = 0; i < required.length; i++) {
-    if (list.indexOf(required[i]) === -1) {
+    if (normalized.indexOf(normalizeHeaderKey_(required[i])) === -1) {
       missing.push(required[i]);
     }
   }
   return missing;
+}
+
+function normalizeHeaderKey_(value) {
+  return String(value || '').trim().toLowerCase().replace(/\s+/g, '_');
+}
+
+let MAYMUN_OWNER_WRITE_CONTEXT_DEPTH = 0;
+
+function enterMaymunOwnerApprovedWriteContext_() {
+  MAYMUN_OWNER_WRITE_CONTEXT_DEPTH += 1;
+}
+
+function exitMaymunOwnerApprovedWriteContext_() {
+  MAYMUN_OWNER_WRITE_CONTEXT_DEPTH = Math.max(0, MAYMUN_OWNER_WRITE_CONTEXT_DEPTH - 1);
+}
+
+function isMaymunOwnerApprovedWriteContextActive_() {
+  return MAYMUN_OWNER_WRITE_CONTEXT_DEPTH > 0;
+}
+
+function normalizeOptions_(options) {
+  const opts = options || {};
+  const requestedOwnerApprovedWrite = Boolean(opts.__ownerApprovedWrite);
+  const requestedDryRun = Boolean(opts.dryRun);
+  const runId = String(opts.runId || newRunId_());
+
+  if (requestedOwnerApprovedWrite) {
+    assertManualUiContext_();
+    if (!isMaymunOwnerApprovedWriteContextActive_()) {
+      writeDebugLog({
+        run_id: runId,
+        module: 'maymun_asset_layer',
+        timestamp: stableNowIso_(),
+        stage: 'maymunWriteLock',
+        fundKey: 'WRITE_LOCK',
+        details: 'Owner-approved write flag rejected outside protected manual entrypoint context.'
+      });
+      throw new Error('Owner-approved MAYMUN write is allowed only inside protected manual entrypoint context');
+    }
+  }
+
+  const ownerApprovedWrite = requestedOwnerApprovedWrite && isMaymunOwnerApprovedWriteContextActive_();
+  const dryRun = ownerApprovedWrite ? false : true;
+
+  if (!requestedDryRun && !ownerApprovedWrite) {
+    writeDebugLog({
+      run_id: runId,
+      module: 'maymun_asset_layer',
+      timestamp: stableNowIso_(),
+      stage: 'maymunWriteLock',
+      fundKey: 'WRITE_LOCK',
+      details: 'Non-dry-run request blocked. MAYMUN_* writes are disabled by hard guardrail.'
+    });
+  }
+
+  return {
+    dryRun: dryRun,
+    actor: String(opts.actor || 'stellar-scrypt'),
+    runId: runId
+  };
+}
+
+function sanitizeForId_(value) {
+  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+}
+
+function stableNowIso_() {
+  return new Date().toISOString();
+}
+
+function getSheetByHeaderMap_(sheet) {
+  const headers = (sheet && sheet.getLastRow() > 0)
+    ? sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(function (h) { return String(h || '').trim(); })
+    : [];
+  const map = {};
+  for (let i = 0; i < headers.length; i++) {
+    const normalized = normalizeHeaderKey_(headers[i]);
+    if (normalized && map[normalized] === undefined) map[normalized] = i;
+  }
+  return { headers: headers, headerMap: map };
+}
+
+function mapObjectToRowByHeader_(obj, headers) {
+  const row = [];
+  const source = obj || {};
+  for (let i = 0; i < headers.length; i++) {
+    row.push(source[headers[i]] !== undefined ? source[headers[i]] : '');
+  }
+  return row;
+}
+
+function ensureHeaders_(sheet, requiredHeaders, options) {
+  const opts = normalizeOptions_(options);
+  const shape = getSheetByHeaderMap_(sheet);
+  const missing = validateSheetHeaders_(shape.headers, requiredHeaders);
+  if (!missing.length) return { action: 'noop', missingHeaders: [] };
+
+  if (!opts.dryRun) {
+    const startCol = shape.headers.length + 1;
+    sheet.getRange(1, startCol, 1, missing.length).setValues([missing]);
+  }
+
+  writeDebugLog({
+    run_id: opts.runId,
+    module: 'maymun_asset_layer',
+    timestamp: stableNowIso_(),
+    stage: 'ensureMaymunHeaders',
+    fundKey: sheet.getName(),
+    details: (opts.dryRun ? '[DRY_RUN] ' : '') + 'Missing headers: ' + missing.join(', ')
+  });
+  return { action: opts.dryRun ? 'dry_run_upgrade' : 'upgraded', missingHeaders: missing };
+}
+
+function ensureSheetWithHeaders_(sheetName, requiredHeaders, options) {
+  const opts = normalizeOptions_(options);
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(sheetName);
+  let created = false;
+
+  if (!sheet) {
+    created = true;
+    if (!opts.dryRun) {
+      sheet = ss.insertSheet(sheetName);
+      sheet.appendRow(requiredHeaders);
+    }
+    writeDebugLog({
+      run_id: opts.runId,
+      module: 'maymun_asset_layer',
+      timestamp: stableNowIso_(),
+      stage: 'ensureMaymunSheet',
+      fundKey: sheetName,
+      details: (opts.dryRun ? '[DRY_RUN] ' : '') + (created ? 'Create sheet with required headers' : 'No-op')
+    });
+  }
+
+  if (!sheet) {
+    return { sheetName: sheetName, created: created, action: opts.dryRun ? 'dry_run_create' : 'created', missingHeaders: requiredHeaders.slice() };
+  }
+
+  const headerResult = ensureHeaders_(sheet, requiredHeaders, opts);
+  return { sheetName: sheetName, created: created, action: created ? (opts.dryRun ? 'dry_run_create' : 'created') : headerResult.action, missingHeaders: headerResult.missingHeaders || [] };
+}
+
+function ensureMaymunEventsSheet_(options) {
+  return ensureSheetWithHeaders_(SHEET_MAYMUN_EVENTS, MAYMUN_EVENTS_HEADERS, options);
+}
+
+function ensureMaymunDecisionsSheet_(options) {
+  return ensureSheetWithHeaders_(SHEET_MAYMUN_DECISIONS, MAYMUN_DECISIONS_HEADERS, options);
+}
+
+function ensureMaymunAllocationsSheet_(options) {
+  return ensureSheetWithHeaders_(SHEET_MAYMUN_ALLOCATIONS, MAYMUN_ALLOCATIONS_HEADERS, options);
+}
+
+function ensureMaymunExpensesSheet_(options) {
+  return ensureSheetWithHeaders_(SHEET_MAYMUN_EXPENSES, MAYMUN_EXPENSES_HEADERS, options);
+}
+
+function ensureMaymunRunwaySheet_(options) {
+  return ensureSheetWithHeaders_(SHEET_MAYMUN_RUNWAY, MAYMUN_RUNWAY_HEADERS, options);
+}
+
+function ensureMaymunAssetLayerSheets(options) {
+  const opts = normalizeOptions_(options);
+  const results = [
+    ensureMaymunEventsSheet_(opts),
+    ensureMaymunDecisionsSheet_(opts),
+    ensureMaymunAllocationsSheet_(opts),
+    ensureMaymunExpensesSheet_(opts),
+    ensureMaymunRunwaySheet_(opts)
+  ];
+
+  writeDebugLog({
+    run_id: opts.runId,
+    module: 'maymun_asset_layer',
+    timestamp: stableNowIso_(),
+    stage: 'ensureMaymunAssetLayerSheets',
+    fundKey: 'ALL',
+    details: (opts.dryRun ? '[DRY_RUN] ' : '') + JSON.stringify(results)
+  });
+
+  return {
+    dryRun: opts.dryRun,
+    runId: opts.runId,
+    results: results
+  };
+}
+
+function ensureMaymunAssetLayerSheetsDryRun() {
+  return ensureMaymunAssetLayerSheets({ dryRun: true, actor: 'manual' });
+}
+
+function runMaymunAssetLayerDryRunHarness() {
+  const runId = newRunId_();
+  const now = stableNowIso_();
+  const outputs = [];
+
+  outputs.push(ensureMaymunAssetLayerSheets({ dryRun: true, actor: 'manual_harness', runId: runId }));
+  outputs.push(appendMaymunEvent({
+    source_type: 'transfer',
+    source_sheet: SHEET_TRANSFERS,
+    source_row: '0',
+    tx_hash: 'HARNESS_TX_HASH_001',
+    op_id: '123456',
+    transfer_key: 'HARNESS_TX_HASH_001:123456',
+    event_type: 'funding_received',
+    project_id: 'UNMAPPED',
+    resident_id: '',
+    account_id: '',
+    asset_code: 'USDC',
+    asset_issuer: '',
+    amount: '10',
+    direction: 'in',
+    event_status: 'manual_review',
+    confidence: 'low',
+    occurred_at: now,
+    detected_at: now,
+    created_by: 'manual_harness',
+    notes: 'Dry-run harness sample event'
+  }, { dryRun: true, actor: 'manual_harness', runId: runId }));
+
+  outputs.push(upsertMaymunDecision({
+    event_id: 'evt_harness_tx_hash_001_123456',
+    decision_type: 'manual_review',
+    decision_status: 'pending_approval',
+    policy_version: 'mvp_v1',
+    project_id: 'UNMAPPED',
+    resident_id: '',
+    amount: '10',
+    asset_code: 'USDC',
+    requires_owner_go: 'TRUE',
+    owner_go_status: 'pending',
+    reason: 'Harness dry-run decision',
+    notes: 'Dry-run only'
+  }, { dryRun: true, actor: 'manual_harness', runId: runId }));
+
+  outputs.push(upsertMaymunAllocation({
+    decision_id: 'dec_evt_harness_tx_hash_001_123456_manual_review_mvp_v1',
+    event_id: 'evt_harness_tx_hash_001_123456',
+    project_id: 'UNMAPPED',
+    resident_id: '',
+    bucket: 'runway',
+    allocation_type: 'planned_outflow',
+    allocation_status: 'pending_approval',
+    asset_code: 'USDC',
+    asset_issuer: '',
+    amount: '10',
+    confirmed_amount: '5',
+    effective_at: now,
+    notes: 'Dry-run allocation should normalize confirmed_amount to 0'
+  }, { dryRun: true, actor: 'manual_harness', runId: runId }));
+
+  outputs.push(appendMaymunExpense({
+    source_type: 'manual',
+    source_ref: 'HARNESS_EXPENSE_001',
+    project_id: 'UNMAPPED',
+    resident_id: '',
+    vendor: 'Harness Vendor',
+    category: 'ops',
+    expense_status: 'planned',
+    asset_code: 'USDC',
+    amount: '3',
+    due_at: now,
+    paid_at: '',
+    recognized_at: now,
+    notes: 'Dry-run expense append'
+  }, { dryRun: true, actor: 'manual_harness', runId: runId }));
+
+  outputs.push(appendMaymunRunwaySnapshot({
+    snapshot_at: now,
+    scope_type: 'global',
+    scope_id: '',
+    asset_code: 'USDC',
+    confirmed_balance: '100',
+    planned_inflow: '0',
+    planned_outflow: '10',
+    confirmed_expenses: '0',
+    net_confirmed_runway: '100',
+    forecast_runway: '90',
+    runway_days: '',
+    source_event_ids: 'evt_harness_tx_hash_001_123456',
+    source_allocation_ids: 'alloc_dec_evt_harness_tx_hash_001_123456_manual_review_mvp_v1_runway_planned_outflow',
+    source_expense_ids: 'exp_manual_harness_expense_001_' + sanitizeForId_(now),
+    calculation_version: 'mvp_v1',
+    notes: 'Dry-run runway snapshot'
+  }, { dryRun: true, actor: 'manual_harness', runId: runId }));
+
+  writeDebugLog({
+    run_id: runId,
+    module: 'maymun_asset_layer',
+    timestamp: stableNowIso_(),
+    stage: 'runMaymunAssetLayerDryRunHarness',
+    fundKey: 'ALL',
+    details: '[DRY_RUN] completed manual harness scenarios'
+  });
+
+  return {
+    runId: runId,
+    dryRun: true,
+    outputs: outputs
+  };
+}
+
+function getMaymunAssetLayerRowCounts() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheetNames = [
+    SHEET_MAYMUN_EVENTS,
+    SHEET_MAYMUN_DECISIONS,
+    SHEET_MAYMUN_ALLOCATIONS,
+    SHEET_MAYMUN_EXPENSES,
+    SHEET_MAYMUN_RUNWAY
+  ];
+  const counts = {};
+
+  for (let i = 0; i < sheetNames.length; i++) {
+    const name = sheetNames[i];
+    const sheet = ss.getSheetByName(name);
+    if (!sheet) {
+      counts[name] = 0;
+      continue;
+    }
+    counts[name] = Math.max(0, sheet.getLastRow() - 1);
+  }
+
+  return counts;
+}
+
+function computeMaymunRowCountDelta(before, after) {
+  const b = before || {};
+  const a = after || {};
+  const allKeys = {};
+  Object.keys(b).forEach(function (k) { allKeys[k] = true; });
+  Object.keys(a).forEach(function (k) { allKeys[k] = true; });
+
+  const delta = {};
+  Object.keys(allKeys).forEach(function (k) {
+    const beforeCount = Number(b[k] || 0);
+    const afterCount = Number(a[k] || 0);
+    delta[k] = {
+      before: beforeCount,
+      after: afterCount,
+      delta: afterCount - beforeCount
+    };
+  });
+  return delta;
+}
+
+function getMaymunAssetLayerStatusSummary() {
+  return 'MAYMUN asset layer status: dry-run mode active; guardrails engaged (manual-only, write lock enforced)';
+}
+
+function getMaymunSheetSpecs_() {
+  return [
+    { sheetName: SHEET_MAYMUN_EVENTS, requiredHeaders: MAYMUN_EVENTS_HEADERS },
+    { sheetName: SHEET_MAYMUN_DECISIONS, requiredHeaders: MAYMUN_DECISIONS_HEADERS },
+    { sheetName: SHEET_MAYMUN_ALLOCATIONS, requiredHeaders: MAYMUN_ALLOCATIONS_HEADERS },
+    { sheetName: SHEET_MAYMUN_EXPENSES, requiredHeaders: MAYMUN_EXPENSES_HEADERS },
+    { sheetName: SHEET_MAYMUN_RUNWAY, requiredHeaders: MAYMUN_RUNWAY_HEADERS }
+  ];
+}
+
+function assertManualUiContext_() {
+  try {
+    const ui = SpreadsheetApp.getUi();
+    if (!ui || typeof ui.alert !== 'function') {
+      throw new Error('UI is unavailable');
+    }
+  } catch (err) {
+    throw new Error('Owner-approved MAYMUN write profile is allowed only from Apps Script UI/manual operator context');
+  }
+}
+
+function validateMaymunSheetReadiness_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const specs = getMaymunSheetSpecs_();
+  const issues = [];
+
+  for (let i = 0; i < specs.length; i++) {
+    const spec = specs[i];
+    const sheet = ss.getSheetByName(spec.sheetName);
+    if (!sheet) {
+      issues.push({ sheet: spec.sheetName, issue: 'missing_sheet' });
+      continue;
+    }
+    const shape = getSheetByHeaderMap_(sheet);
+    const missingHeaders = validateSheetHeaders_(shape.headers, spec.requiredHeaders);
+    if (missingHeaders.length) {
+      issues.push({ sheet: spec.sheetName, issue: 'missing_headers', missing: missingHeaders });
+    }
+  }
+
+  return {
+    ok: issues.length === 0,
+    issues: issues
+  };
+}
+
+function listDebugLogRowsByRunId_(runId) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(SHEET_DEBUG);
+  if (!sheet || sheet.getLastRow() <= 1) return [];
+
+  const shape = getSheetByHeaderMap_(sheet);
+  const runIdIdx = shape.headerMap['run_id'];
+  const stageIdx = shape.headerMap['stage'];
+  const detailsIdx = shape.headerMap['details'] !== undefined ? shape.headerMap['details'] : shape.headerMap['details_json'];
+  if (runIdIdx === undefined) return [];
+
+  const data = sheet.getRange(2, 1, sheet.getLastRow() - 1, sheet.getLastColumn()).getValues();
+  const rows = [];
+  for (let i = 0; i < data.length; i++) {
+    if (String(data[i][runIdIdx] || '').trim() !== String(runId || '').trim()) continue;
+    rows.push({
+      stage: stageIdx !== undefined ? String(data[i][stageIdx] || '') : '',
+      details: detailsIdx !== undefined ? String(data[i][detailsIdx] || '') : ''
+    });
+  }
+  return rows;
+}
+
+function buildMaymunOwnerApprovedPayload_(actor, now) {
+  const confirmedEvent = {
+    source_type: 'transfer',
+    source_sheet: SHEET_TRANSFERS,
+    source_row: '1',
+    tx_hash: 'OWNER_APPROVED_CONFIRMED_TX_001',
+    op_id: '1',
+    transfer_key: 'OWNER_APPROVED_CONFIRMED_TX_001:1',
+    event_type: 'funding_received',
+    project_id: 'P1001',
+    resident_id: 'RESIDENT_P1001',
+    account_id: 'ACC_P1001',
+    asset_code: 'USDC',
+    asset_issuer: '',
+    amount: '100',
+    direction: 'in',
+    event_status: 'confirmed',
+    confidence: 'high',
+    occurred_at: now,
+    detected_at: now,
+    created_by: actor,
+    notes: 'Owner-approved manual write profile: confirmed transfer-backed event'
+  };
+
+  const ambiguousEvent = {
+    source_type: 'transfer',
+    source_sheet: SHEET_TRANSFERS,
+    source_row: '2',
+    tx_hash: 'OWNER_APPROVED_AMBIGUOUS_TX_001',
+    op_id: '1',
+    transfer_key: 'OWNER_APPROVED_AMBIGUOUS_TX_001:1',
+    event_type: 'funding_received',
+    project_id: 'AMBIGUOUS',
+    resident_id: '',
+    account_id: '',
+    asset_code: 'USDC',
+    asset_issuer: '',
+    amount: '40',
+    direction: 'in',
+    event_status: 'manual_review',
+    confidence: 'low',
+    occurred_at: now,
+    detected_at: now,
+    created_by: actor,
+    notes: 'Owner-approved manual write profile: ambiguous case routed to manual review'
+  };
+
+  const confirmedEventId = buildMaymunEventId_(confirmedEvent);
+  const ambiguousEventId = buildMaymunEventId_(ambiguousEvent);
+
+  return {
+    confirmedEvent: confirmedEvent,
+    ambiguousEvent: ambiguousEvent,
+    decision: {
+      event_id: ambiguousEventId,
+      decision_type: 'manual_review',
+      decision_status: 'approved',
+      policy_version: 'mvp_v1',
+      project_id: 'AMBIGUOUS',
+      resident_id: '',
+      amount: ambiguousEvent.amount,
+      asset_code: ambiguousEvent.asset_code,
+      requires_owner_go: 'TRUE',
+      owner_go_status: 'approved',
+      reason: 'Owner-approved manual review decision for ambiguous event',
+      notes: 'Owner GO marker required in DEBUG_LOG'
+    },
+    allocation: {
+      decision_id: `dec_${sanitizeForId_(ambiguousEventId)}_manual_review_mvp_v1`,
+      event_id: ambiguousEventId,
+      project_id: 'AMBIGUOUS',
+      resident_id: '',
+      bucket: 'runway',
+      allocation_type: 'planned_outflow',
+      allocation_status: 'confirmed',
+      asset_code: 'USDC',
+      asset_issuer: '',
+      amount: '40',
+      confirmed_amount: '40',
+      effective_at: now,
+      notes: 'Owner-approved confirmed allocation from manual path'
+    },
+    expense: {
+      source_type: 'manual',
+      source_ref: 'OWNER_APPROVED_EXPENSE_001',
+      project_id: 'P1001',
+      resident_id: 'RESIDENT_P1001',
+      vendor: 'Manual Operator',
+      category: 'ops',
+      expense_status: 'planned',
+      asset_code: 'USDC',
+      amount: '5',
+      due_at: now,
+      paid_at: '',
+      recognized_at: now,
+      notes: 'Owner-approved manual expense write profile'
+    },
+    runway: {
+      snapshot_at: now,
+      scope_type: 'global',
+      scope_id: 'owner_manual_profile',
+      asset_code: 'USDC',
+      confirmed_balance: '100',
+      planned_inflow: '0',
+      planned_outflow: '45',
+      confirmed_expenses: '5',
+      net_confirmed_runway: '95',
+      forecast_runway: '55',
+      runway_days: '',
+      source_event_ids: [confirmedEventId, ambiguousEventId].join(','),
+      source_allocation_ids: `alloc_${sanitizeForId_(`dec_${sanitizeForId_(ambiguousEventId)}_manual_review_mvp_v1`)}_runway_planned_outflow`,
+      source_expense_ids: `exp_manual_owner_approved_expense_001_${sanitizeForId_(now)}`,
+      calculation_version: 'mvp_v1',
+      notes: 'Owner-approved runway snapshot using confirmed fields only'
+    }
+  };
+}
+
+function executeMaymunOwnerApprovedProfile_(payload, writeOpts) {
+  const outputs = [];
+  outputs.push(appendMaymunEvent(payload.confirmedEvent, writeOpts));
+  outputs.push(appendMaymunEvent(payload.ambiguousEvent, writeOpts));
+  outputs.push(upsertMaymunDecision(payload.decision, writeOpts));
+  outputs.push(upsertMaymunAllocation(payload.allocation, writeOpts));
+  outputs.push(appendMaymunExpense(payload.expense, writeOpts));
+  outputs.push(appendMaymunRunwaySnapshot(payload.runway, writeOpts));
+  return outputs;
+}
+
+function runMaymunAssetLayerOwnerApprovedWrite(options) {
+  assertManualUiContext_();
+
+  const opts = Object.assign({}, options || {});
+  const runId = String(opts.runId || newRunId_());
+  const actor = String(opts.actor || 'owner_manual_operator');
+  const ownerGoMarker = String(opts.ownerGoMarker || 'OWNER_GO: approved manual MAYMUN_* write profile (variant B)');
+  const now = stableNowIso_();
+
+  writeDebugLog({
+    run_id: runId,
+    module: 'maymun_asset_layer',
+    timestamp: stableNowIso_(),
+    stage: 'runMaymunAssetLayerOwnerApprovedWrite.owner_marker',
+    fundKey: 'OWNER_GO',
+    details: ownerGoMarker
+  });
+
+  const before = getMaymunAssetLayerRowCounts();
+  const readiness = validateMaymunSheetReadiness_();
+  const payload = buildMaymunOwnerApprovedPayload_(actor, now);
+  const previewRunId = `${runId}_precheck_preview`;
+  const previewOpts = { dryRun: true, actor: actor, runId: previewRunId };
+  const dryRunPreview = executeMaymunOwnerApprovedProfile_(payload, previewOpts);
+
+  const precheck = {
+    rowCountsBefore: before,
+    sheetReadiness: readiness,
+    dryRunPreview: dryRunPreview,
+    manualEntrypointConfirmed: true
+  };
+
+  writeDebugLog({
+    run_id: runId,
+    module: 'maymun_asset_layer',
+    timestamp: stableNowIso_(),
+    stage: 'runMaymunAssetLayerOwnerApprovedWrite.precheck',
+    fundKey: readiness.ok ? 'OK' : 'ERROR',
+    details: JSON.stringify(precheck)
+  });
+
+  if (!readiness.ok) {
+    throw new Error('Owner-approved write precheck failed: missing MAYMUN_* sheets or headers. See DEBUG_LOG for details.');
+  }
+
+  const writeOpts = {
+    dryRun: false,
+    actor: actor,
+    runId: runId,
+    __ownerApprovedWrite: true
+  };
+
+  enterMaymunOwnerApprovedWriteContext_();
+  try {
+    const outputs = executeMaymunOwnerApprovedProfile_(payload, writeOpts);
+
+    const repeatCheck = appendMaymunEvent(payload.confirmedEvent, writeOpts);
+    const after = getMaymunAssetLayerRowCounts();
+    const delta = computeMaymunRowCountDelta(before, after);
+    const debugRows = listDebugLogRowsByRunId_(runId);
+
+    const postcheck = {
+      rowCountsAfter: after,
+      rowDelta: delta,
+      addedOrUpdated: outputs,
+      repeatCheck: repeatCheck,
+      debugLogRows: debugRows.length
+    };
+
+    writeDebugLog({
+      run_id: runId,
+      module: 'maymun_asset_layer',
+      timestamp: stableNowIso_(),
+      stage: 'runMaymunAssetLayerOwnerApprovedWrite.postcheck',
+      fundKey: 'ALL',
+      details: JSON.stringify(postcheck)
+    });
+
+    return {
+      runId: runId,
+      dryRun: false,
+      ownerMarker: ownerGoMarker,
+      precheck: precheck,
+      postcheck: postcheck
+    };
+  } finally {
+    exitMaymunOwnerApprovedWriteContext_();
+  }
+}
+
+function runMaymunAssetLayerLimitedNonDryRun(options) {
+  const summary = getMaymunAssetLayerStatusSummary();
+  writeDebugLog({
+    run_id: newRunId_(),
+    module: 'maymun_asset_layer',
+    timestamp: stableNowIso_(),
+    stage: 'runMaymunAssetLayerLimitedNonDryRun.deprecated',
+    fundKey: 'HOLD',
+    details: summary + '; use runMaymunAssetLayerOwnerApprovedWrite() for owner-approved manual writes'
+  });
+  return runMaymunAssetLayerDryRunHarness();
+}
+
+function runMaymunAssetLayerLimitedDryRun() {
+  return runMaymunAssetLayerDryRunHarness();
+}
+
+function runMaymunAssetLayerLimitedNonDryRunGuarded() {
+  return runMaymunAssetLayerOwnerApprovedWrite({
+    actor: 'owner_guarded_runner',
+    ownerGoMarker: 'OWNER_GO: approved manual MAYMUN_* write profile via guarded alias'
+  });
+}
+
+function normalizeTransferEventDedupeKey_(txHash, opId) {
+  const tx = sanitizeForId_(txHash);
+  const op = sanitizeForId_(opId);
+  return tx && op ? `${tx}:${op}` : '';
+}
+
+function buildMaymunEventId_(event) {
+  const sourceType = String((event || {}).source_type || '').trim().toLowerCase();
+  if (sourceType === 'transfer') {
+    const tx = sanitizeForId_((event || {}).tx_hash);
+    const op = sanitizeForId_((event || {}).op_id);
+    if (tx && op) return `evt_${tx}_${op}`;
+  }
+  const seed = sanitizeForId_((event || {}).transfer_key || (event || {}).source_ref || Utilities.getUuid());
+  return `evt_${seed || Utilities.getUuid()}`;
+}
+
+function appendMaymunEvent(event, options) {
+  const opts = normalizeOptions_(options);
+  ensureMaymunEventsSheet_(opts);
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(SHEET_MAYMUN_EVENTS);
+  if (!sheet) throw new Error('MAYMUN_EVENTS sheet is unavailable');
+
+  const payload = Object.assign({}, event || {});
+  payload.source_type = String(payload.source_type || '').trim().toLowerCase();
+  payload.source_sheet = String(payload.source_sheet || SHEET_TRANSFERS).trim();
+  payload.event_status = String(payload.event_status || 'detected').trim();
+  payload.confidence = String(payload.confidence || 'medium').trim();
+  payload.detected_at = String(payload.detected_at || stableNowIso_());
+  payload.created_by = String(payload.created_by || opts.actor);
+  payload.event_id = String(payload.event_id || buildMaymunEventId_(payload));
+
+  const required = ['event_id', 'source_type', 'event_type', 'asset_code', 'amount', 'direction', 'event_status', 'confidence', 'occurred_at', 'detected_at', 'created_by'];
+  if (payload.source_type === 'transfer') {
+    required.push('tx_hash', 'op_id', 'transfer_key');
+  }
+
+  const missing = required.filter(function (key) {
+    return payload[key] === undefined || payload[key] === null || String(payload[key]).trim() === '';
+  });
+  if (missing.length) {
+    writeDebugLog({ run_id: opts.runId, module: 'maymun_asset_layer', timestamp: stableNowIso_(), stage: 'appendMaymunEvent', fundKey: 'ERROR', details: 'Validation failed, missing: ' + missing.join(', ') });
+    throw new Error('appendMaymunEvent validation failed: ' + missing.join(', '));
+  }
+
+  if (payload.source_type === 'transfer') {
+    const dedupeKey = normalizeTransferEventDedupeKey_(payload.tx_hash, payload.op_id);
+    const shape = getSheetByHeaderMap_(sheet);
+    const txIdx = shape.headerMap['tx_hash'];
+    const opIdx = shape.headerMap['op_id'];
+    if (txIdx !== undefined && opIdx !== undefined && sheet.getLastRow() > 1) {
+      const data = sheet.getRange(2, 1, sheet.getLastRow() - 1, sheet.getLastColumn()).getValues();
+      for (let i = 0; i < data.length; i++) {
+        const existingKey = normalizeTransferEventDedupeKey_(data[i][txIdx], data[i][opIdx]);
+        if (existingKey && dedupeKey && existingKey === dedupeKey) {
+          writeDebugLog({ run_id: opts.runId, module: 'maymun_asset_layer', timestamp: stableNowIso_(), stage: 'appendMaymunEvent', fundKey: SHEET_MAYMUN_EVENTS, details: (opts.dryRun ? '[DRY_RUN] ' : '') + 'duplicate_skipped tx_hash+op_id=' + dedupeKey });
+          return { action: 'duplicate_skipped', dedupeKey: dedupeKey, event_id: payload.event_id };
+        }
+      }
+    }
+  }
+
+  const headers = getSheetByHeaderMap_(sheet).headers;
+  const row = mapObjectToRowByHeader_(payload, headers);
+  if (!opts.dryRun) {
+    sheet.getRange(sheet.getLastRow() + 1, 1, 1, row.length).setValues([row]);
+  }
+
+  writeDebugLog({ run_id: opts.runId, module: 'maymun_asset_layer', timestamp: stableNowIso_(), stage: 'appendMaymunEvent', fundKey: SHEET_MAYMUN_EVENTS, details: (opts.dryRun ? '[DRY_RUN] ' : '') + 'append event_id=' + payload.event_id });
+  return { action: opts.dryRun ? 'dry_run_append' : 'appended', event_id: payload.event_id };
+}
+
+function findRowByKey_(sheet, keyBuilder) {
+  if (!sheet || sheet.getLastRow() <= 1) return -1;
+  const shape = getSheetByHeaderMap_(sheet);
+  const data = sheet.getRange(2, 1, sheet.getLastRow() - 1, sheet.getLastColumn()).getValues();
+  for (let i = 0; i < data.length; i++) {
+    if (keyBuilder(data[i], shape.headerMap) === true) return i + 2;
+  }
+  return -1;
+}
+
+function upsertMaymunDecision(decision, options) {
+  const opts = normalizeOptions_(options);
+  ensureMaymunDecisionsSheet_(opts);
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_MAYMUN_DECISIONS);
+  if (!sheet) throw new Error('MAYMUN_DECISIONS sheet is unavailable');
+
+  const payload = Object.assign({}, decision || {});
+  payload.created_by = String(payload.created_by || opts.actor);
+  payload.created_at = String(payload.created_at || stableNowIso_());
+  payload.updated_at = stableNowIso_();
+  payload.owner_go_status = String(payload.owner_go_status || 'not_required');
+  payload.requires_owner_go = String(payload.requires_owner_go || 'FALSE').toUpperCase() === 'TRUE' ? 'TRUE' : 'FALSE';
+  if (!payload.decision_id) {
+    const eid = sanitizeForId_(payload.event_id);
+    const type = sanitizeForId_(payload.decision_type);
+    const policy = sanitizeForId_(payload.policy_version);
+    payload.decision_id = `dec_${eid}_${type}_${policy}`;
+  }
+
+  const required = ['decision_id', 'event_id', 'decision_type', 'decision_status', 'policy_version', 'amount', 'asset_code', 'requires_owner_go', 'owner_go_status', 'reason', 'created_at', 'updated_at', 'created_by'];
+  const missing = required.filter(function (key) { return payload[key] === undefined || payload[key] === null || String(payload[key]).trim() === ''; });
+  if (missing.length) throw new Error('upsertMaymunDecision validation failed: ' + missing.join(', '));
+
+  const shape = getSheetByHeaderMap_(sheet);
+  const rowIndex = findRowByKey_(sheet, function (row, map) {
+    return String(row[map['event_id']] || '').trim() === String(payload.event_id).trim() &&
+      String(row[map['decision_type']] || '').trim() === String(payload.decision_type).trim() &&
+      String(row[map['policy_version']] || '').trim() === String(payload.policy_version).trim();
+  });
+
+  if (rowIndex > 0 && shape.headerMap['created_at'] !== undefined) {
+    payload.created_at = String(sheet.getRange(rowIndex, shape.headerMap['created_at'] + 1).getValue() || payload.created_at);
+  }
+
+  const row = mapObjectToRowByHeader_(payload, shape.headers);
+  if (!opts.dryRun) {
+    if (rowIndex > 0) sheet.getRange(rowIndex, 1, 1, row.length).setValues([row]);
+    else sheet.getRange(sheet.getLastRow() + 1, 1, 1, row.length).setValues([row]);
+  }
+
+  writeDebugLog({ run_id: opts.runId, module: 'maymun_asset_layer', timestamp: stableNowIso_(), stage: 'upsertMaymunDecision', fundKey: SHEET_MAYMUN_DECISIONS, details: (opts.dryRun ? '[DRY_RUN] ' : '') + (rowIndex > 0 ? 'update ' : 'insert ') + payload.decision_id });
+  return { action: rowIndex > 0 ? (opts.dryRun ? 'dry_run_update' : 'updated') : (opts.dryRun ? 'dry_run_insert' : 'inserted'), decision_id: payload.decision_id };
+}
+
+function upsertMaymunAllocation(allocation, options) {
+  const opts = normalizeOptions_(options);
+  ensureMaymunAllocationsSheet_(opts);
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_MAYMUN_ALLOCATIONS);
+  if (!sheet) throw new Error('MAYMUN_ALLOCATIONS sheet is unavailable');
+
+  const payload = Object.assign({}, allocation || {});
+  payload.created_by = String(payload.created_by || opts.actor);
+  payload.created_at = String(payload.created_at || stableNowIso_());
+  payload.updated_at = stableNowIso_();
+  payload.allocation_status = String(payload.allocation_status || 'proposed').trim();
+  if (!payload.allocation_id) {
+    payload.allocation_id = `alloc_${sanitizeForId_(payload.decision_id)}_${sanitizeForId_(payload.bucket)}_${sanitizeForId_(payload.allocation_type)}`;
+  }
+
+  const isConfirmed = String(payload.allocation_status).trim() === 'confirmed';
+  const confirmedAmount = Number(payload.confirmed_amount || 0);
+  if (!isConfirmed && confirmedAmount !== 0) {
+    payload.confirmed_amount = 0;
+    writeDebugLog({ run_id: opts.runId, module: 'maymun_asset_layer', timestamp: stableNowIso_(), stage: 'upsertMaymunAllocation', fundKey: SHEET_MAYMUN_ALLOCATIONS, details: 'normalized confirmed_amount to 0 for non-confirmed allocation' });
+  }
+
+  const required = ['allocation_id', 'decision_id', 'event_id', 'bucket', 'allocation_type', 'allocation_status', 'asset_code', 'amount', 'confirmed_amount', 'effective_at', 'created_at', 'updated_at', 'created_by'];
+  const missing = required.filter(function (key) { return payload[key] === undefined || payload[key] === null || String(payload[key]).trim() === ''; });
+  if (missing.length) throw new Error('upsertMaymunAllocation validation failed: ' + missing.join(', '));
+
+  const shape = getSheetByHeaderMap_(sheet);
+  const rowIndex = findRowByKey_(sheet, function (row, map) {
+    return String(row[map['decision_id']] || '').trim() === String(payload.decision_id).trim() &&
+      String(row[map['bucket']] || '').trim() === String(payload.bucket).trim() &&
+      String(row[map['allocation_type']] || '').trim() === String(payload.allocation_type).trim();
+  });
+
+  if (rowIndex > 0 && shape.headerMap['created_at'] !== undefined) {
+    payload.created_at = String(sheet.getRange(rowIndex, shape.headerMap['created_at'] + 1).getValue() || payload.created_at);
+  }
+
+  const row = mapObjectToRowByHeader_(payload, shape.headers);
+  if (!opts.dryRun) {
+    if (rowIndex > 0) sheet.getRange(rowIndex, 1, 1, row.length).setValues([row]);
+    else sheet.getRange(sheet.getLastRow() + 1, 1, 1, row.length).setValues([row]);
+  }
+
+  writeDebugLog({ run_id: opts.runId, module: 'maymun_asset_layer', timestamp: stableNowIso_(), stage: 'upsertMaymunAllocation', fundKey: SHEET_MAYMUN_ALLOCATIONS, details: (opts.dryRun ? '[DRY_RUN] ' : '') + (rowIndex > 0 ? 'update ' : 'insert ') + payload.allocation_id });
+  return { action: rowIndex > 0 ? (opts.dryRun ? 'dry_run_update' : 'updated') : (opts.dryRun ? 'dry_run_insert' : 'inserted'), allocation_id: payload.allocation_id };
+}
+
+function appendMaymunExpense(expense, options) {
+  const opts = normalizeOptions_(options);
+  ensureMaymunExpensesSheet_(opts);
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_MAYMUN_EXPENSES);
+  if (!sheet) throw new Error('MAYMUN_EXPENSES sheet is unavailable');
+
+  const payload = Object.assign({}, expense || {});
+  payload.created_by = String(payload.created_by || opts.actor);
+  payload.created_at = String(payload.created_at || stableNowIso_());
+  payload.updated_at = String(payload.updated_at || payload.created_at);
+  if (!payload.expense_id) {
+    const key = `${sanitizeForId_(payload.source_type)}_${sanitizeForId_(payload.source_ref)}_${sanitizeForId_(payload.recognized_at)}`;
+    payload.expense_id = 'exp_' + (key.replace(/_+/g, '_').replace(/^_+|_+$/g, '') || Utilities.getUuid());
+  }
+
+  const required = ['expense_id', 'source_type', 'category', 'expense_status', 'asset_code', 'amount', 'recognized_at', 'created_at', 'updated_at', 'created_by'];
+  const missing = required.filter(function (key) { return payload[key] === undefined || payload[key] === null || String(payload[key]).trim() === ''; });
+  if (missing.length) throw new Error('appendMaymunExpense validation failed: ' + missing.join(', '));
+
+  const row = mapObjectToRowByHeader_(payload, getSheetByHeaderMap_(sheet).headers);
+  if (!opts.dryRun) sheet.getRange(sheet.getLastRow() + 1, 1, 1, row.length).setValues([row]);
+
+  writeDebugLog({ run_id: opts.runId, module: 'maymun_asset_layer', timestamp: stableNowIso_(), stage: 'appendMaymunExpense', fundKey: SHEET_MAYMUN_EXPENSES, details: (opts.dryRun ? '[DRY_RUN] ' : '') + 'append expense_id=' + payload.expense_id });
+  return { action: opts.dryRun ? 'dry_run_append' : 'appended', expense_id: payload.expense_id };
+}
+
+function appendMaymunRunwaySnapshot(snapshot, options) {
+  const opts = normalizeOptions_(options);
+  ensureMaymunRunwaySheet_(opts);
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_MAYMUN_RUNWAY);
+  if (!sheet) throw new Error('MAYMUN_RUNWAY sheet is unavailable');
+
+  const payload = Object.assign({}, snapshot || {});
+  payload.created_by = String(payload.created_by || opts.actor);
+  payload.snapshot_at = String(payload.snapshot_at || stableNowIso_());
+  if (!payload.snapshot_id) {
+    payload.snapshot_id = `runway_${sanitizeForId_(payload.snapshot_at)}_${sanitizeForId_(payload.scope_type)}_${sanitizeForId_(payload.scope_id)}_${sanitizeForId_(payload.asset_code)}`;
+  }
+
+  const required = ['snapshot_id', 'snapshot_at', 'scope_type', 'asset_code', 'confirmed_balance', 'planned_inflow', 'planned_outflow', 'confirmed_expenses', 'net_confirmed_runway', 'forecast_runway', 'calculation_version', 'created_by'];
+  const missing = required.filter(function (key) { return payload[key] === undefined || payload[key] === null || String(payload[key]).trim() === ''; });
+  if (missing.length) throw new Error('appendMaymunRunwaySnapshot validation failed: ' + missing.join(', '));
+
+  const note = String(payload.notes || '');
+  if (/pending|unconfirmed|ambiguous/i.test(note)) {
+    writeDebugLog({ run_id: opts.runId, module: 'maymun_asset_layer', timestamp: stableNowIso_(), stage: 'appendMaymunRunwaySnapshot', fundKey: 'ERROR', details: 'Rejected snapshot: notes indicate unconfirmed liquidity' });
+    throw new Error('appendMaymunRunwaySnapshot rejected: notes indicate unconfirmed liquidity in confirmed fields');
+  }
+
+  const row = mapObjectToRowByHeader_(payload, getSheetByHeaderMap_(sheet).headers);
+  if (!opts.dryRun) sheet.getRange(sheet.getLastRow() + 1, 1, 1, row.length).setValues([row]);
+
+  writeDebugLog({ run_id: opts.runId, module: 'maymun_asset_layer', timestamp: stableNowIso_(), stage: 'appendMaymunRunwaySnapshot', fundKey: SHEET_MAYMUN_RUNWAY, details: (opts.dryRun ? '[DRY_RUN] ' : '') + 'append snapshot_id=' + payload.snapshot_id });
+  return { action: opts.dryRun ? 'dry_run_append' : 'appended', snapshot_id: payload.snapshot_id };
 }
 
 function readSheetRowsAsObjects_(sheet) {
@@ -3267,10 +4198,10 @@ function fetchTransactionsBetweenAddresses(fromAddr, toAddr, assetCode, assetIss
 
 // ========== Тестовая функция ==========
 function testFetchTransactionsBetweenAddresses() {
-  const fromAddr = 'GBGGX7QD3JCPFKOJTLBRAFU3SIME3WSNDXETWI63EDCORLBB6HIP2CRR'; // Binance USDC hot wallet
-  const toAddr = 'GCKCV7T56CAPFUYMCQUYSEUMZRC7GA7CAQ2BOL3RPS4NQXDTRCSULMFB'; // Known USDC holder
+  const fromAddr = 'GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
+  const toAddr = 'GYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY';
   const assetCode = 'EURMTL';
-  const assetIssuer = 'GACKTN5DAZGWXRWB2WLM6OPBDHAMT6SJNGLJZPQMEZBUR4JUGBX2UK7V'; // Centre issuer
+  const assetIssuer = 'GZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ';
   const startDate = new Date('2022-01-01T00:00:00Z');
   const endDate = new Date('2026-01-01T23:59:59Z');
   try {
@@ -3706,6 +4637,21 @@ function upgradeExistingSheets() {
   initializeResidentTimeline();
   initializeTokenFlows();
   initializeIssuerStructure();
+}
+
+function initializeMaymunAssetLayerSheetsManual() {
+  const summary = getMaymunAssetLayerStatusSummary();
+  writeDebugLog({
+    run_id: newRunId_(),
+    module: 'maymun_asset_layer',
+    timestamp: stableNowIso_(),
+    stage: 'initializeMaymunAssetLayerSheetsManual.status',
+    fundKey: 'ALL',
+    details: summary
+  });
+  Logger.log(summary);
+
+  return ensureMaymunAssetLayerSheets({ dryRun: true, actor: 'manual_entrypoint' });
 }
 
 function syncAccountsMeta() {

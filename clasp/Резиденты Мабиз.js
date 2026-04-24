@@ -115,6 +115,7 @@ function onOpen() {
     .addItem('Апгрейд листа TRANSFERS', 'upgradeTransfersSheet')
     .addItem('Апгрейд листа RESIDENTS', 'upgradeResidentsSheet')
     .addItem('Апгрейд всех листов', 'upgradeExistingSheets')
+    .addItem('MAYMUN: Dry-run init/check листов', 'initializeMaymunAssetLayerSheetsManual')
     .addSeparator()
     .addItem('Обновить Created данные аккаунтов', 'updateAccountCreationDetails')
     .addItem('Обновить метаданные аккаунтов', 'syncAccountsMeta')
@@ -1960,8 +1961,22 @@ function normalizeHeaderKey_(value) {
 
 function normalizeOptions_(options) {
   const opts = options || {};
+  const requestedDryRun = Boolean(opts.dryRun);
+  const dryRun = true;
+
+  if (!requestedDryRun) {
+    writeDebugLog({
+      run_id: String(opts.runId || newRunId_()),
+      module: 'maymun_asset_layer',
+      timestamp: stableNowIso_(),
+      stage: 'maymunWriteLock',
+      fundKey: 'WRITE_LOCK',
+      details: 'Non-dry-run request blocked. MAYMUN_* writes are disabled by hard guardrail.'
+    });
+  }
+
   return {
-    dryRun: Boolean(opts.dryRun),
+    dryRun: dryRun,
     actor: String(opts.actor || 'stellar-scrypt'),
     runId: String(opts.runId || newRunId_())
   };
@@ -2257,8 +2272,7 @@ function runMaymunAssetLayerLimitedNonDryRun(options) {
   const opts = Object.assign({}, options || {});
   const runId = String(opts.runId || newRunId_());
   const actor = String(opts.actor || 'owner_limited_runner');
-  const allowNonDryRun = opts.allowNonDryRun === true;
-  const dryRun = !allowNonDryRun;
+  const dryRun = true;
   const now = stableNowIso_();
 
   writeDebugLog({
@@ -2270,16 +2284,14 @@ function runMaymunAssetLayerLimitedNonDryRun(options) {
     details: (dryRun ? '[DRY_RUN_DEFAULT] ' : '') + 'limited runner start'
   });
 
-  if (!dryRun) {
-    writeDebugLog({
-      run_id: runId,
-      module: 'maymun_asset_layer',
-      timestamp: stableNowIso_(),
-      stage: 'runMaymunAssetLayerLimitedNonDryRun.owner_gate',
-      fundKey: 'OWNER_GATE',
-      details: 'OWNER_GATE_MARKER allowNonDryRun=true owner-approved limited run'
-    });
-  }
+  writeDebugLog({
+    run_id: runId,
+    module: 'maymun_asset_layer',
+    timestamp: stableNowIso_(),
+    stage: 'runMaymunAssetLayerLimitedNonDryRun.owner_gate_blocked',
+    fundKey: 'OWNER_GATE',
+    details: 'Owner gate override is disabled. Forced dry-run only for MAYMUN_* writes.'
+  });
 
   const writeOpts = { dryRun: dryRun, actor: actor, runId: runId };
   const outputs = [];
@@ -2403,8 +2415,8 @@ function runMaymunAssetLayerLimitedNonDryRun(options) {
   return {
     runId: runId,
     dryRun: dryRun,
-    guardApplied: allowNonDryRun,
-    ownerGateMarkerLogged: !dryRun,
+    guardApplied: true,
+    ownerGateMarkerLogged: false,
     before: before,
     after: after,
     delta: delta,
@@ -4385,7 +4397,6 @@ function initializeNewSheets() {
   initializeResidentTimeline();
   initializeTokenFlows();
   initializeIssuerStructure();
-  ensureMaymunAssetLayerSheets();
   writeDebugLog({
     timestamp: new Date().toISOString(),
     stage: 'initializeNewSheets',
@@ -4448,7 +4459,10 @@ function upgradeExistingSheets() {
   initializeResidentTimeline();
   initializeTokenFlows();
   initializeIssuerStructure();
-  ensureMaymunAssetLayerSheets();
+}
+
+function initializeMaymunAssetLayerSheetsManual() {
+  return ensureMaymunAssetLayerSheets({ dryRun: true, actor: 'manual_entrypoint' });
 }
 
 function syncAccountsMeta() {

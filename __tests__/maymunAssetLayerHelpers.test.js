@@ -9,6 +9,8 @@ describe('maymun asset layer helpers', () => {
   test('builds deterministic transfer dedupe key', () => {
     expect(normalizeTransferEventDedupeKey('ABC123', '987')).toBe('abc123:987');
     expect(normalizeTransferEventDedupeKey('  AbC123  ', '  987  ')).toBe('abc123:987');
+    expect(normalizeTransferEventDedupeKey('  A b C123  ', '  987  ')).toBe('a b c123:987');
+    expect(normalizeTransferEventDedupeKey('TX_HASH_MIXED', 'Op-001')).toBe('tx_hash_mixed:op-001');
     expect(normalizeTransferEventDedupeKey('', '987')).toBe('');
   });
 

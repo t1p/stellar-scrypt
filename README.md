@@ -84,9 +84,15 @@
 
 Проверяйте логи после каждого запуска для выявления фильтров или ошибок.
 
-## MAYMUN Asset Layer (MVP data/write)
+## MAYMUN Asset Layer (owner-approved manual profile)
 
-Добавлен минимальный data/write слой для листов `MAYMUN_*` по контракту MVP:
+MAYMUN-слой работает в двух режимах:
+
+* **Safe default**: global dry-run only (`normalizeOptions_` принудительно держит `dryRun=true` для обычных вызовов).
+* **Owner-approved manual write profile**: отдельный ручной entrypoint только для Apps Script UI/manual operator:
+  * `runMaymunAssetLayerOwnerApprovedWrite(options)`
+
+Листы и контракт остаются прежними:
 
 * `MAYMUN_EVENTS`
 * `MAYMUN_DECISIONS`
@@ -94,28 +100,24 @@
 * `MAYMUN_EXPENSES`
 * `MAYMUN_RUNWAY`
 
-Новые Apps Script функции:
+Ключевые ограничения (обязательны):
 
-* `ensureMaymunAssetLayerSheets(options)`
-* `appendMaymunEvent(event, options)`
-* `upsertMaymunDecision(decision, options)`
-* `upsertMaymunAllocation(allocation, options)`
-* `appendMaymunExpense(expense, options)`
-* `appendMaymunRunwaySnapshot(snapshot, options)`
+* merge status: **HOLD**;
+* no cron;
+* no live ClickUp/Telegram projection;
+* no unattended CLI automation (`clasp run` путь не используется);
+* no runtime / credentials / provider wiring changes.
 
-Поддерживается dry-run режим через options вида:
+Owner-approved write profile делает:
 
-```js
-{ dryRun: true, actor: 'stellar-scrypt', runId: 'custom-run-id' }
-```
+1. owner marker в `DEBUG_LOG` (`fund_key=OWNER_GO`);
+2. precheck (row counts, наличие MAYMUN-листов, проверка заголовков, dry-run preview);
+3. ручной write-run из отдельного entrypoint;
+4. postcheck (row delta, DEBUG_LOG rows, список add/update, repeat/dedup check для `tx_hash + op_id`).
 
-Для быстрого прогона проверяемых dry-run сценариев используйте:
+Идемпотентность transfer-backed events сохраняется: дедуп по `tx_hash + op_id`.
 
-* `ensureMaymunAssetLayerSheetsDryRun()`
-* `runMaymunAssetLayerDryRunHarness()`
-
-Идемпотентность transfer-backed events: дедуп по `tx_hash + op_id`.
-Все действия ensure/append/upsert (включая dry-run) логируются в `DEBUG_LOG` с `module: maymun_asset_layer`.
+Rollback и пошаговый безопасный запуск описаны в [`docs/MAYMUN_OWNER_MANUAL_RUNBOOK.md`](docs/MAYMUN_OWNER_MANUAL_RUNBOOK.md).
 
 ## Безопасность
 

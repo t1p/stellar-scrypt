@@ -2317,16 +2317,13 @@ function getMaymunSheetSpecs_() {
 }
 
 function assertManualUiContext_() {
+  // v2 (2026-04-24T22:49:00Z): Simplified check - only verify active user, not UI availability
+  // Reason: SpreadsheetApp.getUi() throws in editor context; Session.getActiveUser() is sufficient
+  // to block cron/triggers (where user is empty) while allowing editor + sheet menu execution
   try {
-    // Check that we have an active user (excludes cron/triggers where user is empty)
     const userEmail = Session.getActiveUser().getEmail();
     if (!userEmail || userEmail.trim() === '') {
       throw new Error('No active user detected');
-    }
-    // Verify UI is available (Apps Script editor or sheet menu context)
-    const ui = SpreadsheetApp.getUi();
-    if (!ui || typeof ui.alert !== 'function') {
-      throw new Error('UI is unavailable');
     }
   } catch (err) {
     throw new Error('Owner-approved MAYMUN write profile is allowed only from Apps Script UI/manual operator context');

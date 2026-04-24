@@ -1960,15 +1960,47 @@ function normalizeHeaderKey_(value) {
   return String(value || '').trim().toLowerCase().replace(/\s+/g, '_');
 }
 
+let MAYMUN_OWNER_WRITE_CONTEXT_DEPTH = 0;
+
+function enterMaymunOwnerApprovedWriteContext_() {
+  MAYMUN_OWNER_WRITE_CONTEXT_DEPTH += 1;
+}
+
+function exitMaymunOwnerApprovedWriteContext_() {
+  MAYMUN_OWNER_WRITE_CONTEXT_DEPTH = Math.max(0, MAYMUN_OWNER_WRITE_CONTEXT_DEPTH - 1);
+}
+
+function isMaymunOwnerApprovedWriteContextActive_() {
+  return MAYMUN_OWNER_WRITE_CONTEXT_DEPTH > 0;
+}
+
 function normalizeOptions_(options) {
   const opts = options || {};
-  const ownerApprovedWrite = Boolean(opts.__ownerApprovedWrite);
+  const requestedOwnerApprovedWrite = Boolean(opts.__ownerApprovedWrite);
   const requestedDryRun = Boolean(opts.dryRun);
+  const runId = String(opts.runId || newRunId_());
+
+  if (requestedOwnerApprovedWrite) {
+    assertManualUiContext_();
+    if (!isMaymunOwnerApprovedWriteContextActive_()) {
+      writeDebugLog({
+        run_id: runId,
+        module: 'maymun_asset_layer',
+        timestamp: stableNowIso_(),
+        stage: 'maymunWriteLock',
+        fundKey: 'WRITE_LOCK',
+        details: 'Owner-approved write flag rejected outside protected manual entrypoint context.'
+      });
+      throw new Error('Owner-approved MAYMUN write is allowed only inside protected manual entrypoint context');
+    }
+  }
+
+  const ownerApprovedWrite = requestedOwnerApprovedWrite && isMaymunOwnerApprovedWriteContextActive_();
   const dryRun = ownerApprovedWrite ? false : true;
 
   if (!requestedDryRun && !ownerApprovedWrite) {
     writeDebugLog({
-      run_id: String(opts.runId || newRunId_()),
+      run_id: runId,
       module: 'maymun_asset_layer',
       timestamp: stableNowIso_(),
       stage: 'maymunWriteLock',
@@ -1980,7 +2012,7 @@ function normalizeOptions_(options) {
   return {
     dryRun: dryRun,
     actor: String(opts.actor || 'stellar-scrypt'),
-    runId: String(opts.runId || newRunId_())
+    runId: runId
   };
 }
 
@@ -2523,37 +2555,43 @@ function runMaymunAssetLayerOwnerApprovedWrite(options) {
     runId: runId,
     __ownerApprovedWrite: true
   };
-  const outputs = executeMaymunOwnerApprovedProfile_(payload, writeOpts);
 
-  const repeatCheck = appendMaymunEvent(payload.confirmedEvent, writeOpts);
-  const after = getMaymunAssetLayerRowCounts();
-  const delta = computeMaymunRowCountDelta(before, after);
-  const debugRows = listDebugLogRowsByRunId_(runId);
+  enterMaymunOwnerApprovedWriteContext_();
+  try {
+    const outputs = executeMaymunOwnerApprovedProfile_(payload, writeOpts);
 
-  const postcheck = {
-    rowCountsAfter: after,
-    rowDelta: delta,
-    addedOrUpdated: outputs,
-    repeatCheck: repeatCheck,
-    debugLogRows: debugRows.length
-  };
+    const repeatCheck = appendMaymunEvent(payload.confirmedEvent, writeOpts);
+    const after = getMaymunAssetLayerRowCounts();
+    const delta = computeMaymunRowCountDelta(before, after);
+    const debugRows = listDebugLogRowsByRunId_(runId);
 
-  writeDebugLog({
-    run_id: runId,
-    module: 'maymun_asset_layer',
-    timestamp: stableNowIso_(),
-    stage: 'runMaymunAssetLayerOwnerApprovedWrite.postcheck',
-    fundKey: 'ALL',
-    details: JSON.stringify(postcheck)
-  });
+    const postcheck = {
+      rowCountsAfter: after,
+      rowDelta: delta,
+      addedOrUpdated: outputs,
+      repeatCheck: repeatCheck,
+      debugLogRows: debugRows.length
+    };
 
-  return {
-    runId: runId,
-    dryRun: false,
-    ownerMarker: ownerGoMarker,
-    precheck: precheck,
-    postcheck: postcheck
-  };
+    writeDebugLog({
+      run_id: runId,
+      module: 'maymun_asset_layer',
+      timestamp: stableNowIso_(),
+      stage: 'runMaymunAssetLayerOwnerApprovedWrite.postcheck',
+      fundKey: 'ALL',
+      details: JSON.stringify(postcheck)
+    });
+
+    return {
+      runId: runId,
+      dryRun: false,
+      ownerMarker: ownerGoMarker,
+      precheck: precheck,
+      postcheck: postcheck
+    };
+  } finally {
+    exitMaymunOwnerApprovedWriteContext_();
+  }
 }
 
 function runMaymunAssetLayerLimitedNonDryRun(options) {

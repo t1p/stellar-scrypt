@@ -208,10 +208,10 @@
 - Защита от противоположного типа: если для того же `decision_id + bucket` уже существует allocation с другим `allocation_type`, новая запись блокируется (`allocation_blocked_conflicting_allocation_type`) до ручного разрешения конфликта.
 
 33. **MAYMUN: Create runway snapshot** → [`runMaymunAssetLayerCreateRunwaySnapshot()`](clasp/Резиденты%20Мабиз.js)
-- Что делает: агрегирует подтверждённые данные из `MAYMUN_ALLOCATIONS` и `MAYMUN_EXPENSES`, формирует append-only snapshot в `MAYMUN_RUNWAY`.
+- Что делает: на активном листе `MAYMUN_ALLOCATIONS` требует выбранную ровно одну data-row, берёт из неё `asset_code` и формирует append-only snapshot в `MAYMUN_RUNWAY` только в этом asset scope.
+- Блокирует запуск, если активный лист не `MAYMUN_ALLOCATIONS`, выбрана не одна data-row или выбранная allocation не `allocation_status=confirmed`.
 - Формулы MVP: `net_confirmed_runway = confirmed_balance - planned_outflow - confirmed_expenses`, `forecast_runway = confirmed_balance - planned_outflow`.
-- В расчёт включаются только `allocation_status=confirmed` и `expense_status in (paid, confirmed)`.
-- Валюта MVP: `USDC` или первый найденный `asset_code` среди подтверждённых allocations.
+- В расчёт включаются только `allocation_status=confirmed` и `expense_status in (paid, confirmed)` для выбранного `asset_code`.
 
 ## Рекомендуемый порядок запуска для новой таблицы
 

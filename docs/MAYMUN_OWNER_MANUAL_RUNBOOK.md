@@ -47,10 +47,12 @@
   - при пустых `approved_by`/`approved_at` пишется warning в `DEBUG_LOG` (`allocation_from_decision.approval_audit_missing`).
   - если для того же `decision_id + bucket` уже есть allocation с противоположным `allocation_type`, запись блокируется (`allocation_blocked_conflicting_allocation_type`) до ручного разрешения.
 - `runMaymunAssetLayerCreateRunwaySnapshot()`:
-  - агрегирует только подтверждённые строки (`allocation_status=confirmed`, `expense_status in (paid, confirmed)`);
+  - запускать только с активного листа `MAYMUN_ALLOCATIONS` и выбранной ровно одной data-row;
+  - выбранная allocation должна быть `allocation_status=confirmed`;
+  - `asset_code` scope берётся из выбранной allocation;
+  - агрегирует только подтверждённые строки (`allocation_status=confirmed`, `expense_status in (paid, confirmed)`) в выбранном `asset_code`;
   - создаёт append-only запись в `MAYMUN_RUNWAY`;
-  - считает `net_confirmed_runway` и `forecast_runway`;
-  - использует один `asset_code` за запуск (`USDC` или первый подтверждённый).
+  - считает `net_confirmed_runway` и `forecast_runway`.
 
 ## Пошаговый запуск (Apps Script UI)
 
@@ -59,7 +61,7 @@
 3. Запустите `MAYMUN: Owner-approved manual write profile`.
 4. Для цепочки после фиксации transfer выполните:
    - `MAYMUN: Create allocation from selected DECISION` (на выбранной строке листа `MAYMUN_DECISIONS`);
-   - `MAYMUN: Create runway snapshot`.
+   - `MAYMUN: Create runway snapshot` (на выбранной строке листа `MAYMUN_ALLOCATIONS`).
 
 Правило блокера для selected TRANSFER:
 

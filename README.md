@@ -129,6 +129,8 @@ Rollback и пошаговый безопасный запуск описаны 
    - Для `allocation_type` используется семантика связанного события (`dividend_received`/`funding_received`/`direction=in` -> `planned_inflow`) с fallback по `decision_type`.
    - Если поля approval-аудита (`approved_by`, `approved_at`) не заполнены, запись не блокируется, но фиксируется warning в `DEBUG_LOG`.
 3. `MAYMUN_EVENTS / MAYMUN_ALLOCATIONS / MAYMUN_EXPENSES -> MAYMUN_RUNWAY` через `MAYMUN: Create runway snapshot`.
+   - Запускать с активного листа `MAYMUN_ALLOCATIONS` и выбранной ровно одной data-row.
+   - `asset_code` scope берётся из выбранной allocation-строки; расчёт агрегирует только этот asset.
 
 Оба новых шага выполняются только вручную из Apps Script UI, используют protected owner write context и не включают cron/live projection.
 

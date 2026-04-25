@@ -5040,7 +5040,7 @@ function runMaymunAssetLayerCreateAllocationFromSelectedDecision() {
   }
 }
 
-// Manual operator scenario (v1.2, 2026-04-25T07:01:06Z): MAYMUN_* -> MAYMUN_RUNWAY snapshot
+// Manual operator scenario (v1.3, 2026-04-25T10:27:00Z): selected MAYMUN_ALLOCATIONS row scopes MAYMUN_RUNWAY snapshot asset.
 function runMaymunAssetLayerCreateRunwaySnapshot() {
   const runId = newRunId_();
   const ui = SpreadsheetApp.getUi();
@@ -5100,30 +5100,48 @@ function runMaymunAssetLayerCreateRunwaySnapshot() {
       return result;
     }
 
-    const allocationRows = readSheetRowsAsObjects_(allocationsSheet);
-    const expenseRows = readSheetRowsAsObjects_(expensesSheet);
-
-    const confirmedAllocations = allocationRows.filter(function (row) {
-      return String(row.allocation_status || '').trim().toLowerCase() === 'confirmed';
-    });
-
-    if (!confirmedAllocations.length) {
-      const msg = 'No confirmed allocations found. Snapshot was not created.';
-      writeDebugLog({ run_id: runId, module: 'maymun_asset_layer', timestamp: stableNowIso_(), stage: 'runway_snapshot.no_confirmed_allocations', fundKey: SHEET_MAYMUN_ALLOCATIONS, details: msg });
-      result.debug_log_stages.push('runway_snapshot.no_confirmed_allocations');
+    const activeSheet = ss.getActiveSheet();
+    if (!activeSheet || activeSheet.getName() !== SHEET_MAYMUN_ALLOCATIONS) {
+      const msg = `Runway snapshot is blocked: select one data row on ${SHEET_MAYMUN_ALLOCATIONS}. Active sheet: ${activeSheet ? activeSheet.getName() : '<none>'}.`;
+      writeDebugLog({ run_id: runId, module: 'maymun_asset_layer', timestamp: stableNowIso_(), stage: 'runway_snapshot.invalid_selection', fundKey: 'ERROR', details: msg });
+      result.debug_log_stages.push('runway_snapshot.invalid_selection');
       ui.alert(msg);
       Logger.log(result);
       return result;
     }
 
-    const candidateAssets = [];
-    for (let i = 0; i < confirmedAllocations.length; i++) {
-      const code = String(confirmedAllocations[i].asset_code || '').trim();
-      if (code && candidateAssets.indexOf(code) === -1) candidateAssets.push(code);
+    const selectedRange = activeSheet.getActiveRange();
+    if (!selectedRange || selectedRange.getNumRows() !== 1 || selectedRange.getRow() === 1) {
+      const msg = `Runway snapshot is blocked: select exactly one data row on ${SHEET_MAYMUN_ALLOCATIONS} (header row is not allowed).`;
+      writeDebugLog({ run_id: runId, module: 'maymun_asset_layer', timestamp: stableNowIso_(), stage: 'runway_snapshot.invalid_selection', fundKey: 'ERROR', details: msg });
+      result.debug_log_stages.push('runway_snapshot.invalid_selection');
+      ui.alert(msg);
+      Logger.log(result);
+      return result;
     }
-    let selectedAssetCode = candidateAssets.indexOf('USDC') >= 0 ? 'USDC' : (candidateAssets[0] || '');
+
+    const selectedRow = selectedRange.getRow();
+    const allocationHeaders = activeSheet.getRange(1, 1, 1, activeSheet.getLastColumn()).getValues()[0];
+    const allocationHeaderMap = {};
+    for (let i = 0; i < allocationHeaders.length; i++) {
+      const normalized = normalizeHeaderKey_(allocationHeaders[i]);
+      if (normalized) allocationHeaderMap[normalized] = i;
+    }
+    const selectedRowValues = activeSheet.getRange(selectedRow, 1, 1, activeSheet.getLastColumn()).getValues()[0];
+    const selectedAllocationStatus = String(selectedRowValues[allocationHeaderMap['allocation_status']] || '').trim().toLowerCase();
+    const selectedAssetCode = String(selectedRowValues[allocationHeaderMap['asset_code']] || '').trim();
+
+    if (selectedAllocationStatus !== 'confirmed') {
+      const msg = `Runway snapshot is blocked: selected allocation must be confirmed. Asset: ${selectedAssetCode || '<empty>'}, allocation_status: ${selectedAllocationStatus || '<empty>'}.`;
+      writeDebugLog({ run_id: runId, module: 'maymun_asset_layer', timestamp: stableNowIso_(), stage: 'runway_snapshot.invalid_selection', fundKey: 'ERROR', details: msg });
+      result.debug_log_stages.push('runway_snapshot.invalid_selection');
+      ui.alert(msg);
+      Logger.log(result);
+      return result;
+    }
+
     if (!selectedAssetCode) {
-      const msg = 'Cannot resolve asset_code for snapshot.';
+      const msg = 'Runway snapshot is blocked: selected allocation has empty asset_code.';
       writeDebugLog({ run_id: runId, module: 'maymun_asset_layer', timestamp: stableNowIso_(), stage: 'runway_snapshot.asset_code_missing', fundKey: SHEET_MAYMUN_ALLOCATIONS, details: msg });
       result.debug_log_stages.push('runway_snapshot.asset_code_missing');
       ui.alert(msg);
@@ -5131,9 +5149,21 @@ function runMaymunAssetLayerCreateRunwaySnapshot() {
       return result;
     }
 
-    const filteredAllocations = confirmedAllocations.filter(function (row) {
-      return String(row.asset_code || '').trim() === selectedAssetCode;
+    const allocationRows = readSheetRowsAsObjects_(allocationsSheet);
+    const expenseRows = readSheetRowsAsObjects_(expensesSheet);
+
+    const confirmedAllocations = allocationRows.filter(function (row) {
+      return String(row.allocation_status || '').trim().toLowerCase() === 'confirmed' && String(row.asset_code || '').trim() === selectedAssetCode;
     });
+
+    if (!confirmedAllocations.length) {
+      const msg = `No confirmed allocations found for selected asset. Asset: ${selectedAssetCode}. Snapshot was not created.`;
+      writeDebugLog({ run_id: runId, module: 'maymun_asset_layer', timestamp: stableNowIso_(), stage: 'runway_snapshot.no_confirmed_allocations', fundKey: SHEET_MAYMUN_ALLOCATIONS, details: msg });
+      result.debug_log_stages.push('runway_snapshot.no_confirmed_allocations');
+      ui.alert(msg);
+      Logger.log(result);
+      return result;
+    }
 
     const paidOrConfirmedExpenses = expenseRows.filter(function (row) {
       const status = String(row.expense_status || '').trim().toLowerCase();
@@ -5157,8 +5187,8 @@ function runMaymunAssetLayerCreateRunwaySnapshot() {
     let plannedOutflow = 0;
     const sourceAllocationIds = [];
     const sourceEventIdsMap = {};
-    for (let i = 0; i < filteredAllocations.length; i++) {
-      const row = filteredAllocations[i];
+    for (let i = 0; i < confirmedAllocations.length; i++) {
+      const row = confirmedAllocations[i];
       const allocationType = String(row.allocation_type || '').trim().toLowerCase();
       const confirmedAmount = Number(row.confirmed_amount || 0);
       if (allocationType === 'planned_inflow') plannedInflow += confirmedAmount;

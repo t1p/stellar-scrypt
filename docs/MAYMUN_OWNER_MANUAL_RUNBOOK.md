@@ -75,11 +75,18 @@
 1. Откройте таблицу и дождитесь меню `Stellar`.
 2. При необходимости выполните `MAYMUN: Dry-run init/check листов`.
 3. Для полуавтоматического режима запустите `MAYMUN: Precheck unprocessed TRANSFERS`.
-   - Результат: только анализ и отчёт (`TRANSFERS -> candidates -> dry-run -> report`).
-   - Разрешённая запись: только в `MAYMUN_RUNS` и `DEBUG_LOG`.
+   - Результат: upsert очереди кандидатов в `MAYMUN_PRECHECK_CANDIDATES` (`approval_status=pending` по умолчанию).
+   - Dedup по `transfer_key = tx_hash + ':' + op_id`; `approval_status` не сбрасывается, если уже `approved`/`rejected`/`hold`.
+   - Служебные записи: `MAYMUN_RUNS` и `DEBUG_LOG` (`precheck_candidates_scan`, `precheck_candidate_upsert`).
    - Запрещено: запись в `MAYMUN_EVENTS`, `MAYMUN_DECISIONS`, `MAYMUN_ALLOCATIONS`, `MAYMUN_EXPENSES`, `MAYMUN_RUNWAY`.
-4. Запустите `MAYMUN: Owner-approved manual write profile`.
-5. Для цепочки после фиксации transfer выполните один из двух путей:
+4. На листе `MAYMUN_PRECHECK_CANDIDATES` вручную проставьте `approval_status` (`approved` / `rejected` / `hold`).
+5. Запустите `MAYMUN: Process approved PRECHECK candidates`.
+   - Берутся только `approval_status=approved` и `processing_status=new`.
+   - За один запуск обрабатывается максимум 10 строк.
+   - Для каждой строки создаётся `MAYMUN_EVENT`; для `manual_review` создаётся `MAYMUN_DECISION`.
+   - В строку кандидата пишутся `processing_status`, `processed_at`, `result_event_id`, `result_decision_id`, `error`.
+6. При необходимости запустите `MAYMUN: Owner-approved manual write profile`.
+7. Для цепочки после фиксации transfer выполните один из двух путей:
 
    **Путь A: Через DECISION (для manual_review событий)**
    - На листе `MAYMUN_DECISIONS` выберите строку с `decision_status=approved` и `owner_go_status=approved`.

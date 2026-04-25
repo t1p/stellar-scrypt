@@ -198,6 +198,25 @@
 - Postcheck: row deltas, `DEBUG_LOG` rows, список add/update, repeat/dedup check по `tx_hash + op_id`.
 - Ограничения: только Apps Script UI/manual operator; не для cron, не для unattended CLI (`clasp run`), merge status остаётся hold.
 
+32. **MAYMUN: Write selected TRANSFER** → [`runMaymunAssetLayerWriteSelectedTransfer()`](clasp/Резиденты%20Мабиз.js)
+- Что делает: безопасный ручной entrypoint для переноса реальной выбранной строки из `TRANSFERS` в `MAYMUN_EVENTS` (и при необходимости в `MAYMUN_DECISIONS`).
+- Как использовать:
+  1. Откройте лист `TRANSFERS`.
+  2. Выберите одну строку данных (не header).
+  3. Запустите меню `MAYMUN: Write selected TRANSFER`.
+  4. Система автоматически создаст `MAYMUN_EVENT` с правильным `event_type` по `direction/class`.
+  5. Если требуется manual review, создаст `MAYMUN_DECISION`.
+  6. Результат вернётся в alert и `DEBUG_LOG`.
+- Preconditions: активный лист должен быть `TRANSFERS`, выбрана ровно одна строка данных, все обязательные поля заполнены (`tx_hash`, `op_id`, `amount`, `asset_code`, `direction`, `project_id`, `fund_account_key`, `class`, `datetime`).
+- Event type rules MVP:
+  - `direction=IN, class=Dividend` → `event_type=dividend_received`, `event_status=confirmed`, `confidence=high`
+  - `direction=IN, class=Funding` → `event_type=funding_received`, `event_status=manual_review`, `confidence=medium`
+  - `direction=OUT` → `event_type=outgoing_transfer`, `event_status=manual_review`, `confidence=medium`
+  - Иначе → `event_type=transfer_detected`, `event_status=manual_review`, `confidence=low`
+- Dedup: по `tx_hash + op_id`; если событие уже существует, вернёт `duplicate_skipped`.
+- Postcheck: row deltas, список действий (event appended/skipped, decision inserted/skipped), `DEBUG_LOG` stages, run_id.
+- Ограничения: только Apps Script UI/manual operator; не для cron, не для unattended CLI; merge status остаётся hold.
+
 ## Рекомендуемый порядок запуска для новой таблицы
 
 1. Подготовить `CONST` (ключи Stellar/ClickUp) по требованиям из [`README.md`](README.md:23).

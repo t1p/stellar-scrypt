@@ -117,6 +117,7 @@ function onOpen() {
     .addItem('Апгрейд всех листов', 'upgradeExistingSheets')
     .addItem('MAYMUN: Dry-run init/check листов', 'initializeMaymunAssetLayerSheetsManual')
     .addItem('MAYMUN: Owner-approved manual write profile', 'runMaymunAssetLayerOwnerApprovedWrite')
+    .addItem('MAYMUN: Write selected TRANSFER', 'runMaymunAssetLayerWriteSelectedTransfer')
     .addSeparator()
     .addItem('Обновить Created данные аккаунтов', 'updateAccountCreationDetails')
     .addItem('Обновить метаданные аккаунтов', 'syncAccountsMeta')
@@ -4826,6 +4827,312 @@ function syncAccountsMeta() {
   }
 }
 
+/**
+ * runMaymunAssetLayerWriteSelectedTransfer()
+ *
+ * Функция для безопасного ручного переноса выбранной строки из TRANSFERS в MAYMUN_EVENTS.
+ * Версия: 2026-04-25T06:05:00Z
+ *
+ * Поведение:
+ * 1. Проверяет, что активный лист — TRANSFERS
+ * 2. Проверяет, что выбрана одна строка данных (не header)
+ * 3. Читает обязательные поля из выбранной строки
+ * 4. Создаёт MAYMUN_EVENT с правильным event_type по direction/class
+ * 5. При необходимости создаёт MAYMUN_DECISION для manual_review кейсов
+ * 6. Выполняет dedup по tx_hash + op_id
+ * 7. Возвращает результат оператору через alert и Logger
+ */
+function runMaymunAssetLayerWriteSelectedTransfer() {
+  assertManualUiContext_();
+  
+  const runId = newRunId_();
+  const now = stableNowIso_();
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  
+  try {
+    // ========== PRECONDITIONS ==========
+    
+    // 1. Проверить активный лист
+    const activeSheet = ss.getActiveSheet();
+    if (activeSheet.getName() !== SHEET_TRANSFERS) {
+      const msg = `Ошибка: активный лист должен быть "${SHEET_TRANSFERS}", а не "${activeSheet.getName()}"`;
+      writeDebugLog({
+        run_id: runId,
+        module: 'maymun_asset_layer',
+        timestamp: now,
+        stage: 'runMaymunAssetLayerWriteSelectedTransfer.precondition',
+        fundKey: 'ERROR',
+        details: 'validation_failed: ' + msg
+      });
+      ui.alert(msg);
+      return { runId, success: false, error: msg };
+    }
+    
+    // 2. Проверить выбранный диапазон
+    const range = activeSheet.getActiveRange();
+    if (!range || range.getNumRows() !== 1) {
+      const msg = 'Ошибка: выберите ровно одну строку данных (не header)';
+      writeDebugLog({
+        run_id: runId,
+        module: 'maymun_asset_layer',
+        timestamp: now,
+        stage: 'runMaymunAssetLayerWriteSelectedTransfer.precondition',
+        fundKey: 'ERROR',
+        details: 'validation_failed: ' + msg
+      });
+      ui.alert(msg);
+      return { runId, success: false, error: msg };
+    }
+    
+    const selectedRow = range.getRow();
+    if (selectedRow === 1) {
+      const msg = 'Ошибка: выбрана строка header. Выберите строку данных.';
+      writeDebugLog({
+        run_id: runId,
+        module: 'maymun_asset_layer',
+        timestamp: now,
+        stage: 'runMaymunAssetLayerWriteSelectedTransfer.precondition',
+        fundKey: 'ERROR',
+        details: 'validation_failed: ' + msg
+      });
+      ui.alert(msg);
+      return { runId, success: false, error: msg };
+    }
+    
+    // 3. Прочитать header и построить map колонок
+    const headerRow = activeSheet.getRange(1, 1, 1, activeSheet.getLastColumn()).getValues()[0];
+    const headerMap = {};
+    for (let i = 0; i < headerRow.length; i++) {
+      const normalized = normalizeHeaderKey_(headerRow[i]);
+      if (normalized) headerMap[normalized] = i;
+    }
+    
+    // 4. Прочитать выбранную строку
+    const dataRow = activeSheet.getRange(selectedRow, 1, 1, activeSheet.getLastColumn()).getValues()[0];
+    
+    // 5. Проверить обязательные поля
+    const requiredFields = ['tx_hash', 'op_id', 'amount', 'asset_code', 'direction', 'project_id', 'fund_account_key', 'class', 'datetime'];
+    const missingFields = [];
+    const transferData = {};
+    
+    for (const field of requiredFields) {
+      const normalized = normalizeHeaderKey_(field);
+      const colIdx = headerMap[normalized];
+      if (colIdx === undefined) {
+        missingFields.push(field);
+        continue;
+      }
+      const value = dataRow[colIdx];
+      if (value === undefined || value === null || String(value).trim() === '') {
+        missingFields.push(field);
+      } else {
+        transferData[field] = value;
+      }
+    }
+    
+    if (missingFields.length > 0) {
+      const msg = `Ошибка: отсутствуют обязательные поля: ${missingFields.join(', ')}`;
+      writeDebugLog({
+        run_id: runId,
+        module: 'maymun_asset_layer',
+        timestamp: now,
+        stage: 'runMaymunAssetLayerWriteSelectedTransfer.precondition',
+        fundKey: 'ERROR',
+        details: 'validation_failed: ' + msg
+      });
+      ui.alert(msg);
+      return { runId, success: false, error: msg };
+    }
+    
+    // ========== MAPPING ==========
+    
+    // Прочитать дополнительные поля (опциональные)
+    const optionalFields = ['asset_issuer', 'from_label', 'to_label', 'memo'];
+    for (const field of optionalFields) {
+      const normalized = normalizeHeaderKey_(field);
+      const colIdx = headerMap[normalized];
+      if (colIdx !== undefined) {
+        transferData[field] = dataRow[colIdx] || '';
+      } else {
+        transferData[field] = '';
+      }
+    }
+    
+    // Построить event_type по direction/class
+    const direction = String(transferData.direction || '').trim().toUpperCase();
+    const transferClass = String(transferData.class || '').trim();
+    
+    let eventType = 'transfer_detected';
+    let eventStatus = 'manual_review';
+    let confidence = 'low';
+    
+    if (direction === 'IN' && transferClass === 'Dividend') {
+      eventType = 'dividend_received';
+      eventStatus = 'confirmed';
+      confidence = 'high';
+    } else if (direction === 'IN' && transferClass === 'Funding') {
+      eventType = 'funding_received';
+      eventStatus = 'manual_review';
+      confidence = 'medium';
+    } else if (direction === 'OUT') {
+      eventType = 'outgoing_transfer';
+      eventStatus = 'manual_review';
+      confidence = 'medium';
+    }
+    
+    // Построить event object
+    const event = {
+      source_type: 'transfer',
+      source_sheet: SHEET_TRANSFERS,
+      source_row: String(selectedRow),
+      tx_hash: String(transferData.tx_hash || '').trim(),
+      op_id: String(transferData.op_id || '').trim(),
+      transfer_key: `${String(transferData.tx_hash || '').trim()}:${String(transferData.op_id || '').trim()}`,
+      event_type: eventType,
+      project_id: String(transferData.project_id || '').trim(),
+      resident_id: '',
+      account_id: String(transferData.fund_account_key || '').trim(),
+      asset_code: String(transferData.asset_code || '').trim(),
+      asset_issuer: String(transferData.asset_issuer || '').trim(),
+      amount: String(transferData.amount || '').trim(),
+      direction: direction.toLowerCase(),
+      event_status: eventStatus,
+      confidence: confidence,
+      occurred_at: String(transferData.datetime || '').trim(),
+      detected_at: now,
+      created_by: 'selected_transfer_manual_operator',
+      notes: `from_label=${transferData.from_label || ''}, to_label=${transferData.to_label || ''}, memo=${transferData.memo || ''}, class=${transferClass}`
+    };
+    
+    // ========== PRECHECK ==========
+    
+    const before = getMaymunAssetLayerRowCounts();
+    const readiness = validateMaymunSheetReadiness_();
+    
+    if (!readiness.ok) {
+      const msg = `Ошибка: MAYMUN листы не готовы. ${JSON.stringify(readiness.issues)}`;
+      writeDebugLog({
+        run_id: runId,
+        module: 'maymun_asset_layer',
+        timestamp: now,
+        stage: 'runMaymunAssetLayerWriteSelectedTransfer.precheck',
+        fundKey: 'ERROR',
+        details: msg
+      });
+      ui.alert(msg);
+      return { runId, success: false, error: msg };
+    }
+    
+    // Dry-run preview
+    const previewRunId = `${runId}_preview`;
+    const previewOpts = { dryRun: true, actor: 'selected_transfer_manual_operator', runId: previewRunId };
+    const previewEvent = appendMaymunEvent(event, previewOpts);
+    
+    writeDebugLog({
+      run_id: runId,
+      module: 'maymun_asset_layer',
+      timestamp: now,
+      stage: 'runMaymunAssetLayerWriteSelectedTransfer.precheck',
+      fundKey: 'OK',
+      details: `Precheck passed. Event preview: ${JSON.stringify(previewEvent)}`
+    });
+    
+    // ========== WRITE ==========
+    
+    const writeOpts = {
+      dryRun: false,
+      actor: 'selected_transfer_manual_operator',
+      runId: runId,
+      __ownerApprovedWrite: true
+    };
+    
+    enterMaymunOwnerApprovedWriteContext_();
+    try {
+      const eventResult = appendMaymunEvent(event, writeOpts);
+      
+      // Если событие создано (не дубликат), проверить нужна ли DECISION
+      let decisionResult = { action: 'skipped', reason: 'not_required' };
+      if (eventResult.action === 'appended' && eventStatus === 'manual_review') {
+        const decision = {
+          event_id: eventResult.event_id,
+          decision_type: 'manual_review',
+          decision_status: 'pending_approval',
+          policy_version: 'mvp_selected_transfer_v1',
+          project_id: event.project_id,
+          resident_id: '',
+          amount: event.amount,
+          asset_code: event.asset_code,
+          requires_owner_go: 'TRUE',
+          owner_go_status: 'pending',
+          reason: 'Manual review required for selected transfer',
+          notes: event.notes
+        };
+        decisionResult = upsertMaymunDecision(decision, writeOpts);
+      }
+      
+      // ========== POSTCHECK ==========
+      
+      const after = getMaymunAssetLayerRowCounts();
+      const delta = computeMaymunRowCountDelta(before, after);
+      
+      writeDebugLog({
+        run_id: runId,
+        module: 'maymun_asset_layer',
+        timestamp: now,
+        stage: 'runMaymunAssetLayerWriteSelectedTransfer.postcheck',
+        fundKey: 'SUCCESS',
+        details: JSON.stringify({
+          event_action: eventResult.action,
+          event_id: eventResult.event_id,
+          decision_action: decisionResult.action,
+          decision_id: decisionResult.decision_id,
+          delta: delta
+        })
+      });
+      
+      // ========== OPERATOR FEEDBACK ==========
+      
+      const alertMsg = `MAYMUN selected transfer processed.
+
+Run ID: ${runId}
+Event: ${eventResult.action}
+Decision: ${decisionResult.action}
+Delta:
+MAYMUN_EVENTS ${delta[SHEET_MAYMUN_EVENTS]?.delta >= 0 ? '+' : ''}${delta[SHEET_MAYMUN_EVENTS]?.delta || 0}
+MAYMUN_DECISIONS ${delta[SHEET_MAYMUN_DECISIONS]?.delta >= 0 ? '+' : ''}${delta[SHEET_MAYMUN_DECISIONS]?.delta || 0}`;
+      
+      Logger.log(alertMsg);
+      ui.alert(alertMsg);
+      
+      return {
+        runId: runId,
+        success: true,
+        eventResult: eventResult,
+        decisionResult: decisionResult,
+        delta: delta
+      };
+      
+    } finally {
+      exitMaymunOwnerApprovedWriteContext_();
+    }
+    
+  } catch (e) {
+    const errorMsg = `Критическая ошибка: ${e.toString()}`;
+    writeDebugLog({
+      run_id: runId,
+      module: 'maymun_asset_layer',
+      timestamp: now,
+      stage: 'runMaymunAssetLayerWriteSelectedTransfer.error',
+      fundKey: 'ERROR',
+      details: errorMsg
+    });
+    Logger.log(errorMsg);
+    ui.alert(errorMsg);
+    return { runId, success: false, error: errorMsg };
+  }
+}
+
 function ping() {
-  return new Date().toISOString();
+   return new Date().toISOString();
 }

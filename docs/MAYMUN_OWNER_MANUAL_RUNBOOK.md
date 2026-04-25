@@ -27,7 +27,9 @@
 
 ## Что пишет owner-approved профиль
 
-Функция может создавать/обновлять строки в листах:
+### Профиль B.1: Owner-approved manual write (демонстрационный payload)
+
+Функция `runMaymunAssetLayerOwnerApprovedWrite()` может создавать/обновлять строки в листах:
 
 - `MAYMUN_EVENTS` (append событий, включая transfer-backed события).
 - `MAYMUN_DECISIONS` (upsert manual review decision).
@@ -36,6 +38,25 @@
 - `MAYMUN_RUNWAY` (append runway snapshot).
 
 Идемпотентность transfer-backed событий: дедуп по `tx_hash + op_id`.
+
+### Профиль B.2: Write selected TRANSFER (реальные данные из выбранной строки)
+
+Функция `runMaymunAssetLayerWriteSelectedTransfer()` позволяет оператору:
+
+1. Выбрать одну строку в листе `TRANSFERS`.
+2. Запустить меню `MAYMUN: Write selected TRANSFER`.
+3. Система автоматически:
+   - Читает реальные значения из выбранной строки.
+   - Создаёт `MAYMUN_EVENT` с правильным `event_type` по `direction/class`.
+   - При необходимости создаёт `MAYMUN_DECISION` для `manual_review` кейсов.
+   - Выполняет dedup по `tx_hash + op_id`.
+   - Возвращает результат оператору через alert и `DEBUG_LOG`.
+
+Поддерживаемые event_type правила MVP:
+- `direction=IN, class=Dividend` → `event_type=dividend_received`, `event_status=confirmed`, `confidence=high`
+- `direction=IN, class=Funding` → `event_type=funding_received`, `event_status=manual_review`, `confidence=medium`
+- `direction=OUT` → `event_type=outgoing_transfer`, `event_status=manual_review`, `confidence=medium`
+- Иначе → `event_type=transfer_detected`, `event_status=manual_review`, `confidence=low`
 
 ## Пошаговый запуск (Apps Script UI)
 

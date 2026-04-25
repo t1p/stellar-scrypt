@@ -120,6 +120,7 @@ function onOpen() {
     .addItem('MAYMUN: Owner-approved manual write profile', 'runMaymunAssetLayerOwnerApprovedWrite')
     .addItem('MAYMUN: Write selected TRANSFER', 'runMaymunAssetLayerWriteSelectedTransfer')
     .addItem('MAYMUN: Create allocation from selected DECISION', 'runMaymunAssetLayerCreateAllocationFromSelectedDecision')
+    .addItem('MAYMUN: Create allocation from selected EVENT', 'runMaymunAssetLayerCreateAllocationFromSelectedEvent')
     .addItem('MAYMUN: Create runway snapshot', 'runMaymunAssetLayerCreateRunwaySnapshot')
     .addSeparator()
     .addItem('Обновить Created данные аккаунтов', 'updateAccountCreationDetails')
@@ -5639,6 +5640,330 @@ MAYMUN_DECISIONS ${delta[SHEET_MAYMUN_DECISIONS]?.delta >= 0 ? '+' : ''}${delta[
       module: 'maymun_asset_layer',
       timestamp: now,
       stage: 'runMaymunAssetLayerWriteSelectedTransfer.error',
+      fundKey: 'ERROR',
+      details: errorMsg
+    });
+    Logger.log(errorMsg);
+    ui.alert(errorMsg);
+    return { runId, success: false, error: errorMsg };
+  }
+}
+
+// Confirmed event -> allocation flow (v1.0, 2026-04-25T14:38:00Z): Direct allocation creation from confirmed MAYMUN_EVENTS
+// Handles: event_status=confirmed (e.g., IN + Dividend with resolved project_id) -> MAYMUN_ALLOCATIONS + MAYMUN_RUNWAY
+function runMaymunAssetLayerCreateAllocationFromSelectedEvent() {
+  assertManualUiContext_();
+  
+  const runId = newRunId_();
+  const now = stableNowIso_();
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  
+  try {
+    // ========== PRECONDITIONS ==========
+    
+    // 1. Проверить активный лист
+    const activeSheet = ss.getActiveSheet();
+    if (activeSheet.getName() !== SHEET_MAYMUN_EVENTS) {
+      const msg = `Ошибка: активный лист должен быть "${SHEET_MAYMUN_EVENTS}", а не "${activeSheet.getName()}"`;
+      writeDebugLog({
+        run_id: runId,
+        module: 'maymun_asset_layer',
+        timestamp: now,
+        stage: 'runMaymunAssetLayerCreateAllocationFromSelectedEvent.precondition',
+        fundKey: 'ERROR',
+        details: 'validation_failed: ' + msg
+      });
+      ui.alert(msg);
+      return { runId, success: false, error: msg };
+    }
+    
+    // 2. Проверить выбранный диапазон
+    const range = activeSheet.getActiveRange();
+    if (!range || range.getNumRows() !== 1) {
+      const msg = 'Ошибка: выберите ровно одну строку данных (не header)';
+      writeDebugLog({
+        run_id: runId,
+        module: 'maymun_asset_layer',
+        timestamp: now,
+        stage: 'runMaymunAssetLayerCreateAllocationFromSelectedEvent.precondition',
+        fundKey: 'ERROR',
+        details: 'validation_failed: ' + msg
+      });
+      ui.alert(msg);
+      return { runId, success: false, error: msg };
+    }
+    
+    const selectedRow = range.getRow();
+    if (selectedRow === 1) {
+      const msg = 'Ошибка: выбрана строка header. Выберите строку данных.';
+      writeDebugLog({
+        run_id: runId,
+        module: 'maymun_asset_layer',
+        timestamp: now,
+        stage: 'runMaymunAssetLayerCreateAllocationFromSelectedEvent.precondition',
+        fundKey: 'ERROR',
+        details: 'validation_failed: ' + msg
+      });
+      ui.alert(msg);
+      return { runId, success: false, error: msg };
+    }
+    
+    // 3. Прочитать header и построить map колонок
+    const headerRow = activeSheet.getRange(1, 1, 1, activeSheet.getLastColumn()).getValues()[0];
+    const headerMap = {};
+    for (let i = 0; i < headerRow.length; i++) {
+      const normalized = normalizeHeaderKey_(headerRow[i]);
+      if (normalized) headerMap[normalized] = i;
+    }
+    
+    // 4. Прочитать выбранную строку
+    const dataRow = activeSheet.getRange(selectedRow, 1, 1, activeSheet.getLastColumn()).getValues()[0];
+    
+    // 5. Проверить обязательные поля
+    const requiredFields = ['event_id', 'event_type', 'event_status', 'project_id', 'amount', 'asset_code', 'direction'];
+    const missingFields = [];
+    const eventData = {};
+    
+    for (const field of requiredFields) {
+      const normalized = normalizeHeaderKey_(field);
+      const colIdx = headerMap[normalized];
+      if (colIdx === undefined) {
+        missingFields.push(field);
+        continue;
+      }
+      const value = dataRow[colIdx];
+      if (value === undefined || value === null || String(value).trim() === '') {
+        missingFields.push(field);
+      } else {
+        eventData[field] = value;
+      }
+    }
+    
+    if (missingFields.length > 0) {
+      const msg = `Ошибка: отсутствуют обязательные поля: ${missingFields.join(', ')}`;
+      writeDebugLog({
+        run_id: runId,
+        module: 'maymun_asset_layer',
+        timestamp: now,
+        stage: 'runMaymunAssetLayerCreateAllocationFromSelectedEvent.precondition',
+        fundKey: 'ERROR',
+        details: 'validation_failed: ' + msg
+      });
+      ui.alert(msg);
+      return { runId, success: false, error: msg };
+    }
+    
+    // ========== VALIDATION ==========
+    
+    const eventStatus = String(eventData.event_status || '').trim().toLowerCase();
+    const projectId = String(eventData.project_id || '').trim();
+    const direction = String(eventData.direction || '').trim().toUpperCase();
+    const eventType = String(eventData.event_type || '').trim();
+    const amount = String(eventData.amount || '').trim();
+    const assetCode = String(eventData.asset_code || '').trim();
+    const eventId = String(eventData.event_id || '').trim();
+    
+    // Блокировать, если event_status != confirmed
+    if (eventStatus !== 'confirmed') {
+      const msg = `Ошибка: event_status должен быть "confirmed", а не "${eventStatus}". Для manual_review используйте путь через DECISION.`;
+      writeDebugLog({
+        run_id: runId,
+        module: 'maymun_asset_layer',
+        timestamp: now,
+        stage: 'runMaymunAssetLayerCreateAllocationFromSelectedEvent.validation',
+        fundKey: 'BLOCKER',
+        details: msg
+      });
+      ui.alert(msg);
+      return { runId, success: false, error: msg };
+    }
+    
+    // Блокировать, если project_id неразрешён
+    if (isUnresolvedProjectId_(projectId)) {
+      const msg = `Ошибка: project_id неразрешён ("${projectId}"). Используйте resolved project_id перед созданием allocation.`;
+      writeDebugLog({
+        run_id: runId,
+        module: 'maymun_asset_layer',
+        timestamp: now,
+        stage: 'runMaymunAssetLayerCreateAllocationFromSelectedEvent.validation',
+        fundKey: 'BLOCKER',
+        details: msg
+      });
+      ui.alert(msg);
+      return { runId, success: false, error: msg };
+    }
+    
+    // ========== MAPPING ==========
+    
+    // Прочитать опциональные поля
+    const optionalFields = ['resident_id', 'asset_issuer'];
+    for (const field of optionalFields) {
+      const normalized = normalizeHeaderKey_(field);
+      const colIdx = headerMap[normalized];
+      if (colIdx !== undefined) {
+        eventData[field] = dataRow[colIdx] || '';
+      } else {
+        eventData[field] = '';
+      }
+    }
+    
+    // Определить allocation_type по event_type и direction
+    let allocationType = 'planned_outflow';
+    if (eventType === 'dividend_received' || eventType === 'funding_received' || direction === 'IN') {
+      allocationType = 'planned_inflow';
+    } else if (direction === 'OUT') {
+      allocationType = 'planned_outflow';
+    } else {
+      allocationType = 'planned_outflow';
+    }
+    
+    // Проверить conflicting allocation type по event_id + bucket
+    const allocationsSheet = ss.getSheetByName(SHEET_MAYMUN_ALLOCATIONS);
+    if (allocationsSheet && allocationsSheet.getLastRow() > 1) {
+      const allocShape = getSheetByHeaderMap_(allocationsSheet);
+      const eventIdIdx = allocShape.headerMap['event_id'];
+      const bucketIdx = allocShape.headerMap['bucket'];
+      const allocTypeIdx = allocShape.headerMap['allocation_type'];
+      
+      if (eventIdIdx !== undefined && bucketIdx !== undefined && allocTypeIdx !== undefined) {
+        const allocData = allocationsSheet.getRange(2, 1, allocationsSheet.getLastRow() - 1, allocationsSheet.getLastColumn()).getValues();
+        for (let i = 0; i < allocData.length; i++) {
+          const existingEventId = String(allocData[i][eventIdIdx] || '').trim();
+          const existingBucket = String(allocData[i][bucketIdx] || '').trim();
+          const existingAllocType = String(allocData[i][allocTypeIdx] || '').trim();
+          
+          if (existingEventId === eventId && existingBucket === 'runway') {
+            if (existingAllocType !== allocationType) {
+              const msg = `Ошибка: conflicting allocation type для event_id="${eventId}" + bucket="runway". Существует: "${existingAllocType}", новый: "${allocationType}".`;
+              writeDebugLog({
+                run_id: runId,
+                module: 'maymun_asset_layer',
+                timestamp: now,
+                stage: 'runMaymunAssetLayerCreateAllocationFromSelectedEvent.validation',
+                fundKey: 'BLOCKER',
+                details: msg
+              });
+              ui.alert(msg);
+              return { runId, success: false, error: msg };
+            }
+          }
+        }
+      }
+    }
+    
+    // ========== PRECHECK ==========
+    
+    const before = getMaymunAssetLayerRowCounts();
+    const readiness = validateMaymunSheetReadiness_();
+    
+    if (!readiness.ok) {
+      const msg = `Ошибка: MAYMUN листы не готовы. ${JSON.stringify(readiness.issues)}`;
+      writeDebugLog({
+        run_id: runId,
+        module: 'maymun_asset_layer',
+        timestamp: now,
+        stage: 'runMaymunAssetLayerCreateAllocationFromSelectedEvent.precheck',
+        fundKey: 'ERROR',
+        details: msg
+      });
+      ui.alert(msg);
+      return { runId, success: false, error: msg };
+    }
+    
+    // Dry-run preview
+    const previewRunId = `${runId}_preview`;
+    const previewOpts = { dryRun: true, actor: 'selected_event_manual_operator', runId: previewRunId };
+    
+    const allocation = {
+      decision_id: '',
+      event_id: eventId,
+      project_id: projectId,
+      resident_id: String(eventData.resident_id || '').trim(),
+      bucket: 'runway',
+      allocation_type: allocationType,
+      allocation_status: 'confirmed',
+      asset_code: assetCode,
+      asset_issuer: String(eventData.asset_issuer || '').trim(),
+      amount: amount,
+      confirmed_amount: amount,
+      effective_at: now,
+      created_by: 'selected_event_manual_operator',
+      notes: 'Created from confirmed MAYMUN_EVENTS row (no decision required)'
+    };
+    
+    const previewAllocation = upsertMaymunAllocation(allocation, previewOpts);
+    
+    writeDebugLog({
+      run_id: runId,
+      module: 'maymun_asset_layer',
+      timestamp: now,
+      stage: 'runMaymunAssetLayerCreateAllocationFromSelectedEvent.precheck',
+      fundKey: 'OK',
+      details: `Precheck passed. Allocation preview: ${JSON.stringify(previewAllocation)}`
+    });
+    
+    // ========== WRITE ==========
+    
+    const writeOpts = {
+      dryRun: false,
+      actor: 'selected_event_manual_operator',
+      runId: runId,
+      __ownerApprovedWrite: true
+    };
+    
+    enterMaymunOwnerApprovedWriteContext_();
+    try {
+      const allocationResult = upsertMaymunAllocation(allocation, writeOpts);
+      
+      // ========== POSTCHECK ==========
+      
+      const after = getMaymunAssetLayerRowCounts();
+      const delta = computeMaymunRowCountDelta(before, after);
+      
+      writeDebugLog({
+        run_id: runId,
+        module: 'maymun_asset_layer',
+        timestamp: now,
+        stage: 'runMaymunAssetLayerCreateAllocationFromSelectedEvent.postcheck',
+        fundKey: 'SUCCESS',
+        details: JSON.stringify({
+          allocation_action: allocationResult.action,
+          allocation_id: allocationResult.allocation_id,
+          delta: delta
+        })
+      });
+      
+      // ========== OPERATOR FEEDBACK ==========
+      
+      const alertMsg = `MAYMUN allocation from confirmed event created.
+
+Run ID: ${runId}
+Allocation: ${allocationResult.action}
+Delta:
+MAYMUN_ALLOCATIONS ${delta[SHEET_MAYMUN_ALLOCATIONS]?.delta >= 0 ? '+' : ''}${delta[SHEET_MAYMUN_ALLOCATIONS]?.delta || 0}`;
+      
+      Logger.log(alertMsg);
+      ui.alert(alertMsg);
+      
+      return {
+        runId: runId,
+        success: true,
+        allocationResult: allocationResult,
+        delta: delta
+      };
+      
+    } finally {
+      exitMaymunOwnerApprovedWriteContext_();
+    }
+    
+  } catch (e) {
+    const errorMsg = `Критическая ошибка: ${e.toString()}`;
+    writeDebugLog({
+      run_id: runId,
+      module: 'maymun_asset_layer',
+      timestamp: now,
+      stage: 'runMaymunAssetLayerCreateAllocationFromSelectedEvent.error',
       fundKey: 'ERROR',
       details: errorMsg
     });

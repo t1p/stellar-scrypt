@@ -125,9 +125,24 @@ Rollback и пошаговый безопасный запуск описаны 
    - Если `project_id` неразрешён (`UNMAPPED`, `UNKNOWN`, пусто и аналоги), событие принудительно получает `event_status=manual_review` и `confidence=low`.
    - Для такого события создаётся `MAYMUN_DECISIONS` с `decision_status=pending_approval`, `owner_go_status=pending`, `reason=project_mapping_required` и явной пометкой о необходимости маппинга на проект из `RESIDENTS`.
    - Даже при `direction=IN` и `class=Dividend` confirmed/auto path блокируется, пока не выполнен project mapping.
-2. `MAYMUN_DECISIONS -> MAYMUN_ALLOCATIONS` через `MAYMUN: Create allocation from selected DECISION`.
+
+**Два пути создания allocation:**
+
+**Путь A: Через DECISION (для manual_review событий)**
+2a. `MAYMUN_DECISIONS -> MAYMUN_ALLOCATIONS` через `MAYMUN: Create allocation from selected DECISION`.
    - Для `allocation_type` используется семантика связанного события (`dividend_received`/`funding_received`/`direction=in` -> `planned_inflow`) с fallback по `decision_type`.
    - Если поля approval-аудита (`approved_by`, `approved_at`) не заполнены, запись не блокируется, но фиксируется warning в `DEBUG_LOG`.
+
+**Путь B: Прямо из confirmed EVENT (для подтвержденных событий)**
+2b. `MAYMUN_EVENTS -> MAYMUN_ALLOCATIONS` через `MAYMUN: Create allocation from selected EVENT` (v1.0, 2026-04-25).
+   - Работает только для событий с `event_status=confirmed` (например, `IN + Dividend` с resolved `project_id`).
+   - Блокирует, если `event_status != confirmed` — для `manual_review` используйте путь A через DECISION.
+   - Блокирует, если `project_id` неразрешён (`UNMAPPED`, `AMBIGUOUS`, `UNKNOWN`, пусто) — используйте resolved `project_id`.
+   - Определяет `allocation_type` по `event_type` и `direction`: `dividend_received`/`funding_received`/`direction=in` → `planned_inflow`, иначе → `planned_outflow`.
+   - Проверяет conflicting allocation type по `event_id + bucket` (аналогично decision-пути).
+   - Создаёт allocation с `allocation_status=confirmed`, `decision_id` пусто (нет decision для confirmed event).
+   - Заполняет `created_by=selected_event_manual_operator`, `notes=Created from confirmed MAYMUN_EVENTS row (no decision required)`.
+
 3. `MAYMUN_EVENTS / MAYMUN_ALLOCATIONS / MAYMUN_EXPENSES -> MAYMUN_RUNWAY` через `MAYMUN: Create runway snapshot`.
    - Запускать с активного листа `MAYMUN_ALLOCATIONS` и выбранной ровно одной data-row.
    - `asset_code` scope берётся из выбранной allocation-строки; расчёт агрегирует только этот asset.

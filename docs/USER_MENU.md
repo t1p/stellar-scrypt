@@ -207,7 +207,16 @@
 - Дедуп: ключ `decision_id + bucket + allocation_type` (повторный запуск не создаёт дубль).
 - Защита от противоположного типа: если для того же `decision_id + bucket` уже существует allocation с другим `allocation_type`, новая запись блокируется (`allocation_blocked_conflicting_allocation_type`) до ручного разрешения конфликта.
 
-33. **MAYMUN: Create runway snapshot** → [`runMaymunAssetLayerCreateRunwaySnapshot()`](clasp/Резиденты%20Мабиз.js)
+33. **MAYMUN: Create allocation from selected EVENT** → [`runMaymunAssetLayerCreateAllocationFromSelectedEvent()`](clasp/Резиденты%20Мабиз.js) (v1.0, 2026-04-25)
+- Что делает: на активном листе `MAYMUN_EVENTS` берёт выбранную строку, проверяет обязательные поля и создаёт allocation в `MAYMUN_ALLOCATIONS` прямо из confirmed события (без промежуточного decision).
+- Условия записи: `event_status=confirmed` и `project_id` разрешён (не `UNMAPPED`, `AMBIGUOUS`, `UNKNOWN`, пусто); иначе запись блокируется.
+- Маппинг: `bucket=runway`, `allocation_status=confirmed`, `decision_id` пусто (нет decision для confirmed event).
+- `allocation_type`: по `event_type` и `direction`: `dividend_received`/`funding_received`/`direction=in` → `planned_inflow`, иначе → `planned_outflow`.
+- Дедуп: ключ `event_id + bucket + allocation_type` (повторный запуск не создаёт дубль).
+- Защита от противоположного типа: если для того же `event_id + bucket` уже существует allocation с другим `allocation_type`, новая запись блокируется до ручного разрешения конфликта.
+- Заполняет `created_by=selected_event_manual_operator`, `notes=Created from confirmed MAYMUN_EVENTS row (no decision required)`.
+
+34. **MAYMUN: Create runway snapshot** → [`runMaymunAssetLayerCreateRunwaySnapshot()`](clasp/Резиденты%20Мабиз.js)
 - Что делает: на активном листе `MAYMUN_ALLOCATIONS` требует выбранную ровно одну data-row, берёт из неё `asset_code` и формирует append-only snapshot в `MAYMUN_RUNWAY` только в этом asset scope.
 - Блокирует запуск, если активный лист не `MAYMUN_ALLOCATIONS`, выбрана не одна data-row или выбранная allocation не `allocation_status=confirmed`.
 - Формулы MVP: `net_confirmed_runway = confirmed_balance - planned_outflow - confirmed_expenses`, `forecast_runway = confirmed_balance - planned_outflow`.

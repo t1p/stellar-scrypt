@@ -39,13 +39,26 @@
 
 Дополнительно для ручной цепочки allocation/runway:
 
+**Путь A: Через DECISION (для manual_review событий)**
 - `runMaymunAssetLayerCreateAllocationFromSelectedDecision()`:
-  - пишет только при `decision_status=approved` и `owner_go_status=approved`;
-  - использует `upsertMaymunAllocation()` с ключом `decision_id + bucket + allocation_type`;
-  - маппинг MVP: `bucket=runway`, `allocation_status=confirmed`;
-  - `allocation_type` определяется приоритетно по связанному `MAYMUN_EVENTS` (`dividend_received`/`funding_received`/`direction=in` -> `planned_inflow`), иначе fallback по `decision_type`;
-  - при пустых `approved_by`/`approved_at` пишется warning в `DEBUG_LOG` (`allocation_from_decision.approval_audit_missing`).
-  - если для того же `decision_id + bucket` уже есть allocation с противоположным `allocation_type`, запись блокируется (`allocation_blocked_conflicting_allocation_type`) до ручного разрешения.
+   - пишет только при `decision_status=approved` и `owner_go_status=approved`;
+   - использует `upsertMaymunAllocation()` с ключом `decision_id + bucket + allocation_type`;
+   - маппинг MVP: `bucket=runway`, `allocation_status=confirmed`;
+   - `allocation_type` определяется приоритетно по связанному `MAYMUN_EVENTS` (`dividend_received`/`funding_received`/`direction=in` -> `planned_inflow`), иначе fallback по `decision_type`;
+   - при пустых `approved_by`/`approved_at` пишется warning в `DEBUG_LOG` (`allocation_from_decision.approval_audit_missing`).
+   - если для того же `decision_id + bucket` уже есть allocation с противоположным `allocation_type`, запись блокируется (`allocation_blocked_conflicting_allocation_type`) до ручного разрешения.
+
+**Путь B: Прямо из confirmed EVENT (для подтвержденных событий, v1.0, 2026-04-25)**
+- `runMaymunAssetLayerCreateAllocationFromSelectedEvent()`:
+   - работает только для событий с `event_status=confirmed` (например, `IN + Dividend` с resolved `project_id`);
+   - блокирует, если `event_status != confirmed` — для `manual_review` используйте путь A через DECISION;
+   - блокирует, если `project_id` неразрешён (`UNMAPPED`, `AMBIGUOUS`, `UNKNOWN`, пусто) — используйте resolved `project_id`;
+   - использует `upsertMaymunAllocation()` с ключом `event_id + bucket + allocation_type`;
+   - маппинг: `bucket=runway`, `allocation_status=confirmed`, `decision_id` пусто (нет decision для confirmed event);
+   - `allocation_type` определяется по `event_type` и `direction`: `dividend_received`/`funding_received`/`direction=in` → `planned_inflow`, иначе → `planned_outflow`;
+   - заполняет `created_by=selected_event_manual_operator`, `notes=Created from confirmed MAYMUN_EVENTS row (no decision required)`;
+   - если для того же `event_id + bucket` уже есть allocation с противоположным `allocation_type`, запись блокируется до ручного разрешения конфликта.
+
 - `runMaymunAssetLayerCreateRunwaySnapshot()`:
   - запускать только с активного листа `MAYMUN_ALLOCATIONS` и выбранной ровно одной data-row;
   - выбранная allocation должна быть `allocation_status=confirmed`;
@@ -62,16 +75,27 @@
 1. Откройте таблицу и дождитесь меню `Stellar`.
 2. При необходимости выполните `MAYMUN: Dry-run init/check листов`.
 3. Запустите `MAYMUN: Owner-approved manual write profile`.
-4. Для цепочки после фиксации transfer выполните:
-   - `MAYMUN: Create allocation from selected DECISION` (на выбранной строке листа `MAYMUN_DECISIONS`);
-   - `MAYMUN: Create runway snapshot` (на выбранной строке листа `MAYMUN_ALLOCATIONS`).
+4. Для цепочки после фиксации transfer выполните один из двух путей:
+
+   **Путь A: Через DECISION (для manual_review событий)**
+   - На листе `MAYMUN_DECISIONS` выберите строку с `decision_status=approved` и `owner_go_status=approved`.
+   - Запустите `MAYMUN: Create allocation from selected DECISION`.
+   - Allocation будет создана в `MAYMUN_ALLOCATIONS` с `bucket=runway`, `allocation_status=confirmed`.
+
+   **Путь B: Прямо из confirmed EVENT (для подтвержденных событий)**
+   - На листе `MAYMUN_EVENTS` выберите строку с `event_status=confirmed` и resolved `project_id`.
+   - Запустите `MAYMUN: Create allocation from selected EVENT`.
+   - Allocation будет создана в `MAYMUN_ALLOCATIONS` с `bucket=runway`, `allocation_status=confirmed`, `decision_id` пусто.
+
+5. После создания allocation запустите `MAYMUN: Create runway snapshot` (на выбранной строке листа `MAYMUN_ALLOCATIONS`).
 
 Правило блокера для selected TRANSFER:
 
 - Если `project_id` неразрешён (`UNMAPPED`, `UNKNOWN`, пусто и аналоги), событие записывается только как `event_status=manual_review` и `confidence=low`.
 - Для такого события обязательно создаётся `MAYMUN_DECISIONS` с `decision_status=pending_approval`, `owner_go_status=pending`, `reason=project_mapping_required`.
 - `IN + Dividend` не даёт auto-confirmed путь при неразрешённом `project_id`: сначала нужен ручной mapping на проект из `RESIDENTS`.
-5. Проверьте `DEBUG_LOG` по `run_id` текущего запуска.
+
+6. Проверьте `DEBUG_LOG` по `run_id` текущего запуска.
 
 ## Precheck (обязательный)
 

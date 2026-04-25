@@ -89,8 +89,9 @@
 MAYMUN-слой работает в двух режимах:
 
 * **Safe default**: global dry-run only (`normalizeOptions_` принудительно держит `dryRun=true` для обычных вызовов).
-* **Owner-approved manual write profile**: отдельный ручной entrypoint только для Apps Script UI/manual operator:
-  * `runMaymunAssetLayerOwnerApprovedWrite(options)`
+* **Owner-approved manual write profile**: отдельные ручные entrypoints только для Apps Script UI/manual operator:
+  * `runMaymunAssetLayerOwnerApprovedWrite(options)` — демонстрационный payload (тестовые события).
+  * `runMaymunAssetLayerWriteSelectedTransfer()` — реальные данные из выбранной строки `TRANSFERS`.
 
 Листы и контракт остаются прежними:
 
@@ -108,12 +109,33 @@ MAYMUN-слой работает в двух режимах:
 * no unattended CLI automation (`clasp run` путь не используется);
 * no runtime / credentials / provider wiring changes.
 
-Owner-approved write profile делает:
+### Профиль B.1: Owner-approved manual write (демонстрационный payload)
+
+`runMaymunAssetLayerOwnerApprovedWrite(options)` делает:
 
 1. owner marker в `DEBUG_LOG` (`fund_key=OWNER_GO`);
 2. precheck (row counts, наличие MAYMUN-листов, проверка заголовков, dry-run preview);
-3. ручной write-run из отдельного entrypoint;
+3. ручной write-run из отдельного entrypoint с демонстрационным payload;
 4. postcheck (row delta, DEBUG_LOG rows, список add/update, repeat/dedup check для `tx_hash + op_id`).
+
+### Профиль B.2: Write selected TRANSFER (реальные данные)
+
+`runMaymunAssetLayerWriteSelectedTransfer()` позволяет оператору:
+
+1. Выбрать одну строку в листе `TRANSFERS`.
+2. Запустить меню `MAYMUN: Write selected TRANSFER`.
+3. Система автоматически:
+   - Читает реальные значения из выбранной строки.
+   - Создаёт `MAYMUN_EVENT` с правильным `event_type` по `direction/class`.
+   - При необходимости создаёт `MAYMUN_DECISION` для `manual_review` кейсов.
+   - Выполняет dedup по `tx_hash + op_id`.
+   - Возвращает результат оператору через alert и `DEBUG_LOG`.
+
+Event type rules MVP:
+- `direction=IN, class=Dividend` → `event_type=dividend_received`, `event_status=confirmed`, `confidence=high`
+- `direction=IN, class=Funding` → `event_type=funding_received`, `event_status=manual_review`, `confidence=medium`
+- `direction=OUT` → `event_type=outgoing_transfer`, `event_status=manual_review`, `confidence=medium`
+- Иначе → `event_type=transfer_detected`, `event_status=manual_review`, `confidence=low`
 
 Идемпотентность transfer-backed events сохраняется: дедуп по `tx_hash + op_id`.
 

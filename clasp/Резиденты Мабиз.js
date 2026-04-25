@@ -5981,6 +5981,21 @@ function runMaymunAssetLayerProcessApprovedPrecheckCandidates() {
 }
 
 // Selected transfer flow update (v1.2, 2026-04-25T09:37:00Z): unresolved project_id is a manual blocker.
+/**
+ * runMaymunAssetLayerWriteSelectedTransfer()
+ *
+ * Функция для безопасного ручного переноса выбранной строки из TRANSFERS в MAYMUN_EVENTS.
+ * Версия: 2026-04-25T06:05:00Z
+ *
+ * Поведение:
+ * 1. Проверяет, что активный лист — TRANSFERS
+ * 2. Проверяет, что выбрана одна строка данных (не header)
+ * 3. Читает обязательные поля из выбранной строки
+ * 4. Создаёт MAYMUN_EVENT с правильным event_type по direction/class
+ * 5. При необходимости создаёт MAYMUN_DECISION для manual_review кейсов
+ * 6. Выполняет dedup по tx_hash + op_id
+ * 7. Возвращает результат оператору через alert и Logger
+ */
 function runMaymunAssetLayerWriteSelectedTransfer() {
   assertManualUiContext_();
   
@@ -6630,5 +6645,5 @@ MAYMUN_ALLOCATIONS ${delta[SHEET_MAYMUN_ALLOCATIONS]?.delta >= 0 ? '+' : ''}${de
 }
 
 function ping() {
-  return new Date().toISOString();
+   return new Date().toISOString();
 }

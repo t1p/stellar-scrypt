@@ -119,6 +119,14 @@ Owner-approved write profile делает:
 
 Rollback и пошаговый безопасный запуск описаны в [`docs/MAYMUN_OWNER_MANUAL_RUNBOOK.md`](docs/MAYMUN_OWNER_MANUAL_RUNBOOK.md).
 
+### Ручной сценарий после фиксации TRANSFER
+
+1. `TRANSFERS -> MAYMUN_EVENTS` через ручной operator flow.
+2. `MAYMUN_DECISIONS -> MAYMUN_ALLOCATIONS` через `MAYMUN: Create allocation from selected DECISION`.
+3. `MAYMUN_EVENTS / MAYMUN_ALLOCATIONS / MAYMUN_EXPENSES -> MAYMUN_RUNWAY` через `MAYMUN: Create runway snapshot`.
+
+Оба новых шага выполняются только вручную из Apps Script UI, используют protected owner write context и не включают cron/live projection.
+
 ## Безопасность
 
 * **ClickUp токен**: Храните `CLICKUP_API_KEY` только в листе CONST. Не коммитите в репозиторий.

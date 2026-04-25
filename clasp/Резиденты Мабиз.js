@@ -117,6 +117,8 @@ function onOpen() {
     .addItem('Апгрейд всех листов', 'upgradeExistingSheets')
     .addItem('MAYMUN: Dry-run init/check листов', 'initializeMaymunAssetLayerSheetsManual')
     .addItem('MAYMUN: Owner-approved manual write profile', 'runMaymunAssetLayerOwnerApprovedWrite')
+    .addItem('MAYMUN: Create allocation from selected DECISION', 'runMaymunAssetLayerCreateAllocationFromSelectedDecision')
+    .addItem('MAYMUN: Create runway snapshot', 'runMaymunAssetLayerCreateRunwaySnapshot')
     .addSeparator()
     .addItem('Обновить Created данные аккаунтов', 'updateAccountCreationDetails')
     .addItem('Обновить метаданные аккаунтов', 'syncAccountsMeta')
@@ -4823,6 +4825,331 @@ function syncAccountsMeta() {
       th.med_threshold || 0,
       th.high_threshold || 0
     ]);
+  }
+}
+
+// Manual operator scenario (v1.1, 2026-04-25T06:59:48Z): MAYMUN_DECISIONS -> MAYMUN_ALLOCATIONS
+function runMaymunAssetLayerCreateAllocationFromSelectedDecision() {
+  const runId = newRunId_();
+  const ui = SpreadsheetApp.getUi();
+  const result = {
+    run_id: runId,
+    allocation_id: '',
+    action: 'blocked',
+    row_delta: {},
+    debug_log_stages: []
+  };
+
+  assertManualUiContext_();
+  enterMaymunOwnerApprovedWriteContext_();
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getActiveSheet();
+    if (!sheet || sheet.getName() !== SHEET_MAYMUN_DECISIONS) {
+      const msg = `Run from ${SHEET_MAYMUN_DECISIONS} only.`;
+      writeDebugLog({ run_id: runId, module: 'maymun_asset_layer', timestamp: stableNowIso_(), stage: 'allocation_from_decision.invalid_sheet', fundKey: SHEET_MAYMUN_DECISIONS, details: msg });
+      ui.alert(msg);
+      result.debug_log_stages.push('allocation_from_decision.invalid_sheet');
+      Logger.log(result);
+      return result;
+    }
+
+    const range = sheet.getActiveRange();
+    const row = range ? range.getRow() : 0;
+    if (!range || range.getNumRows() !== 1 || row <= 1) {
+      const msg = 'Select exactly one data row in MAYMUN_DECISIONS.';
+      writeDebugLog({ run_id: runId, module: 'maymun_asset_layer', timestamp: stableNowIso_(), stage: 'allocation_from_decision.invalid_selection', fundKey: SHEET_MAYMUN_DECISIONS, details: msg });
+      ui.alert(msg);
+      result.debug_log_stages.push('allocation_from_decision.invalid_selection');
+      Logger.log(result);
+      return result;
+    }
+
+    const shape = getSheetByHeaderMap_(sheet);
+    const missingHeaders = validateSheetHeaders_(shape.headers, MAYMUN_DECISIONS_HEADERS);
+    if (missingHeaders.length) {
+      const msg = 'Missing headers in MAYMUN_DECISIONS: ' + missingHeaders.join(', ');
+      writeDebugLog({ run_id: runId, module: 'maymun_asset_layer', timestamp: stableNowIso_(), stage: 'allocation_from_decision.missing_headers', fundKey: SHEET_MAYMUN_DECISIONS, details: msg });
+      ui.alert(msg);
+      result.debug_log_stages.push('allocation_from_decision.missing_headers');
+      Logger.log(result);
+      return result;
+    }
+
+    const rowData = sheet.getRange(row, 1, 1, sheet.getLastColumn()).getValues()[0];
+    const decision = {};
+    for (let i = 0; i < shape.headers.length; i++) {
+      decision[shape.headers[i]] = rowData[i];
+    }
+
+    const required = ['decision_id', 'event_id', 'decision_type', 'decision_status', 'project_id', 'amount', 'asset_code', 'owner_go_status'];
+    const missing = required.filter(function (key) {
+      return decision[key] === undefined || decision[key] === null || String(decision[key]).trim() === '';
+    });
+    if (missing.length) {
+      const msg = 'Missing required fields in selected decision: ' + missing.join(', ');
+      writeDebugLog({ run_id: runId, module: 'maymun_asset_layer', timestamp: stableNowIso_(), stage: 'allocation_from_decision.missing_required_fields', fundKey: SHEET_MAYMUN_DECISIONS, details: msg });
+      ui.alert(msg);
+      result.debug_log_stages.push('allocation_from_decision.missing_required_fields');
+      Logger.log(result);
+      return result;
+    }
+
+    const decisionStatus = String(decision.decision_status || '').trim().toLowerCase();
+    const ownerGoStatus = String(decision.owner_go_status || '').trim().toLowerCase();
+    if (decisionStatus !== 'approved' || ownerGoStatus !== 'approved') {
+      const msg = 'Allocation blocked: decision is not approved by decision_status/owner_go_status.';
+      writeDebugLog({ run_id: runId, module: 'maymun_asset_layer', timestamp: stableNowIso_(), stage: 'allocation_blocked_pending_approval', fundKey: SHEET_MAYMUN_DECISIONS, details: msg + ` decision_status=${decisionStatus}, owner_go_status=${ownerGoStatus}` });
+      ui.alert('Decision is not approved. Allocation was not created.');
+      result.debug_log_stages.push('allocation_blocked_pending_approval');
+      Logger.log(result);
+      return result;
+    }
+
+    const amount = Number(decision.amount || 0);
+    const allocationType = String(decision.decision_type || '').trim() === 'record_income' ? 'planned_inflow' : 'planned_outflow';
+    const before = getMaymunAssetLayerRowCounts();
+
+    const upsert = upsertMaymunAllocation({
+      decision_id: String(decision.decision_id).trim(),
+      event_id: String(decision.event_id).trim(),
+      project_id: String(decision.project_id || '').trim(),
+      resident_id: String(decision.resident_id || '').trim(),
+      bucket: 'runway',
+      allocation_type: allocationType,
+      allocation_status: 'confirmed',
+      asset_code: String(decision.asset_code || '').trim(),
+      asset_issuer: '',
+      amount: amount,
+      confirmed_amount: amount,
+      effective_at: stableNowIso_(),
+      created_by: 'selected_decision_manual_operator',
+      notes: 'Created from selected MAYMUN_DECISIONS row'
+    }, {
+      runId: runId,
+      actor: 'selected_decision_manual_operator',
+      __ownerApprovedWrite: true
+    });
+
+    const after = getMaymunAssetLayerRowCounts();
+    const delta = computeMaymunRowCountDelta(before, after);
+
+    result.allocation_id = upsert.allocation_id;
+    result.action = upsert.action;
+    result.row_delta = delta;
+    result.debug_log_stages.push('upsertMaymunAllocation');
+
+    const message = [
+      'Allocation created from selected decision.',
+      '',
+      `Run ID: ${runId}`,
+      `Decision: ${String(decision.decision_id).trim()}`,
+      `Allocation: ${upsert.action}`,
+      `Delta: ${SHEET_MAYMUN_ALLOCATIONS} ${delta[SHEET_MAYMUN_ALLOCATIONS] ? (delta[SHEET_MAYMUN_ALLOCATIONS].delta >= 0 ? '+' : '') + delta[SHEET_MAYMUN_ALLOCATIONS].delta : '+0'}`
+    ].join('\n');
+
+    ui.alert(message);
+    Logger.log(result);
+    return result;
+  } finally {
+    exitMaymunOwnerApprovedWriteContext_();
+  }
+}
+
+// Manual operator scenario (v1.2, 2026-04-25T07:01:06Z): MAYMUN_* -> MAYMUN_RUNWAY snapshot
+function runMaymunAssetLayerCreateRunwaySnapshot() {
+  const runId = newRunId_();
+  const ui = SpreadsheetApp.getUi();
+  const result = {
+    run_id: runId,
+    snapshot_id: '',
+    action: 'blocked',
+    row_delta: {},
+    asset_code: '',
+    debug_log_stages: []
+  };
+
+  assertManualUiContext_();
+  enterMaymunOwnerApprovedWriteContext_();
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const eventsSheet = ss.getSheetByName(SHEET_MAYMUN_EVENTS);
+    const allocationsSheet = ss.getSheetByName(SHEET_MAYMUN_ALLOCATIONS);
+    const expensesSheet = ss.getSheetByName(SHEET_MAYMUN_EXPENSES);
+    const runwaySheet = ss.getSheetByName(SHEET_MAYMUN_RUNWAY);
+
+    const missingSheets = [];
+    if (!eventsSheet) missingSheets.push(SHEET_MAYMUN_EVENTS);
+    if (!allocationsSheet) missingSheets.push(SHEET_MAYMUN_ALLOCATIONS);
+    if (!expensesSheet) missingSheets.push(SHEET_MAYMUN_EXPENSES);
+    if (!runwaySheet) missingSheets.push(SHEET_MAYMUN_RUNWAY);
+    if (missingSheets.length) {
+      const msg = 'Missing sheets: ' + missingSheets.join(', ');
+      writeDebugLog({ run_id: runId, module: 'maymun_asset_layer', timestamp: stableNowIso_(), stage: 'runway_snapshot.missing_sheets', fundKey: 'ERROR', details: msg });
+      result.debug_log_stages.push('runway_snapshot.missing_sheets');
+      ui.alert(msg);
+      Logger.log(result);
+      return result;
+    }
+
+    const missingHeaders = [];
+    const eventsShape = getSheetByHeaderMap_(eventsSheet);
+    const allocationsShape = getSheetByHeaderMap_(allocationsSheet);
+    const expensesShape = getSheetByHeaderMap_(expensesSheet);
+    const runwayShape = getSheetByHeaderMap_(runwaySheet);
+
+    const eventsMissing = validateSheetHeaders_(eventsShape.headers, MAYMUN_EVENTS_HEADERS);
+    const allocationsMissing = validateSheetHeaders_(allocationsShape.headers, MAYMUN_ALLOCATIONS_HEADERS);
+    const expensesMissing = validateSheetHeaders_(expensesShape.headers, MAYMUN_EXPENSES_HEADERS);
+    const runwayMissing = validateSheetHeaders_(runwayShape.headers, MAYMUN_RUNWAY_HEADERS);
+    if (eventsMissing.length) missingHeaders.push(`${SHEET_MAYMUN_EVENTS}: ${eventsMissing.join(', ')}`);
+    if (allocationsMissing.length) missingHeaders.push(`${SHEET_MAYMUN_ALLOCATIONS}: ${allocationsMissing.join(', ')}`);
+    if (expensesMissing.length) missingHeaders.push(`${SHEET_MAYMUN_EXPENSES}: ${expensesMissing.join(', ')}`);
+    if (runwayMissing.length) missingHeaders.push(`${SHEET_MAYMUN_RUNWAY}: ${runwayMissing.join(', ')}`);
+
+    if (missingHeaders.length) {
+      const msg = 'Missing required headers. ' + missingHeaders.join(' | ');
+      writeDebugLog({ run_id: runId, module: 'maymun_asset_layer', timestamp: stableNowIso_(), stage: 'runway_snapshot.missing_headers', fundKey: 'ERROR', details: msg });
+      result.debug_log_stages.push('runway_snapshot.missing_headers');
+      ui.alert(msg);
+      Logger.log(result);
+      return result;
+    }
+
+    const allocationRows = readSheetRowsAsObjects_(allocationsSheet);
+    const expenseRows = readSheetRowsAsObjects_(expensesSheet);
+
+    const confirmedAllocations = allocationRows.filter(function (row) {
+      return String(row.allocation_status || '').trim().toLowerCase() === 'confirmed';
+    });
+
+    if (!confirmedAllocations.length) {
+      const msg = 'No confirmed allocations found. Snapshot was not created.';
+      writeDebugLog({ run_id: runId, module: 'maymun_asset_layer', timestamp: stableNowIso_(), stage: 'runway_snapshot.no_confirmed_allocations', fundKey: SHEET_MAYMUN_ALLOCATIONS, details: msg });
+      result.debug_log_stages.push('runway_snapshot.no_confirmed_allocations');
+      ui.alert(msg);
+      Logger.log(result);
+      return result;
+    }
+
+    const candidateAssets = [];
+    for (let i = 0; i < confirmedAllocations.length; i++) {
+      const code = String(confirmedAllocations[i].asset_code || '').trim();
+      if (code && candidateAssets.indexOf(code) === -1) candidateAssets.push(code);
+    }
+    let selectedAssetCode = candidateAssets.indexOf('USDC') >= 0 ? 'USDC' : (candidateAssets[0] || '');
+    if (!selectedAssetCode) {
+      const msg = 'Cannot resolve asset_code for snapshot.';
+      writeDebugLog({ run_id: runId, module: 'maymun_asset_layer', timestamp: stableNowIso_(), stage: 'runway_snapshot.asset_code_missing', fundKey: SHEET_MAYMUN_ALLOCATIONS, details: msg });
+      result.debug_log_stages.push('runway_snapshot.asset_code_missing');
+      ui.alert(msg);
+      Logger.log(result);
+      return result;
+    }
+
+    const filteredAllocations = confirmedAllocations.filter(function (row) {
+      return String(row.asset_code || '').trim() === selectedAssetCode;
+    });
+
+    const paidOrConfirmedExpenses = expenseRows.filter(function (row) {
+      const status = String(row.expense_status || '').trim().toLowerCase();
+      return (status === 'paid' || status === 'confirmed') && String(row.asset_code || '').trim() === selectedAssetCode;
+    });
+
+    const ambiguousAllocations = allocationRows.filter(function (row) {
+      const st = String(row.allocation_status || '').trim().toLowerCase();
+      return st === 'pending' || st === 'manual_review' || st === 'proposed' || st === 'pending_approval' || st === 'ambiguous';
+    }).length;
+    const ambiguousExpenses = expenseRows.filter(function (row) {
+      const st = String(row.expense_status || '').trim().toLowerCase();
+      return st === 'pending' || st === 'manual_review' || st === 'proposed' || st === 'pending_approval' || st === 'ambiguous';
+    }).length;
+    if (ambiguousAllocations + ambiguousExpenses > 0) {
+      writeDebugLog({ run_id: runId, module: 'maymun_asset_layer', timestamp: stableNowIso_(), stage: 'runway_snapshot.unconfirmed_rows_ignored', fundKey: 'WARN', details: `ignored allocations=${ambiguousAllocations}, expenses=${ambiguousExpenses}` });
+      result.debug_log_stages.push('runway_snapshot.unconfirmed_rows_ignored');
+    }
+
+    let plannedInflow = 0;
+    let plannedOutflow = 0;
+    const sourceAllocationIds = [];
+    const sourceEventIdsMap = {};
+    for (let i = 0; i < filteredAllocations.length; i++) {
+      const row = filteredAllocations[i];
+      const allocationType = String(row.allocation_type || '').trim().toLowerCase();
+      const confirmedAmount = Number(row.confirmed_amount || 0);
+      if (allocationType === 'planned_inflow') plannedInflow += confirmedAmount;
+      if (allocationType === 'planned_outflow') plannedOutflow += confirmedAmount;
+      const allocationId = String(row.allocation_id || '').trim();
+      if (allocationId) sourceAllocationIds.push(allocationId);
+      const eventId = String(row.event_id || '').trim();
+      if (eventId) sourceEventIdsMap[eventId] = true;
+    }
+
+    let confirmedExpenses = 0;
+    const sourceExpenseIds = [];
+    for (let i = 0; i < paidOrConfirmedExpenses.length; i++) {
+      const row = paidOrConfirmedExpenses[i];
+      confirmedExpenses += Number(row.amount || 0);
+      const expenseId = String(row.expense_id || '').trim();
+      if (expenseId) sourceExpenseIds.push(expenseId);
+    }
+
+    const confirmedBalance = plannedInflow;
+    const netConfirmedRunway = confirmedBalance - plannedOutflow - confirmedExpenses;
+    const forecastRunway = confirmedBalance - plannedOutflow;
+    const now = stableNowIso_();
+
+    const before = getMaymunAssetLayerRowCounts();
+    const appended = appendMaymunRunwaySnapshot({
+      snapshot_id: `runway_${sanitizeForId_(now)}_${sanitizeForId_(selectedAssetCode)}`,
+      snapshot_at: now,
+      scope_type: 'global',
+      scope_id: 'manual_snapshot',
+      asset_code: selectedAssetCode,
+      confirmed_balance: confirmedBalance,
+      planned_inflow: plannedInflow,
+      planned_outflow: plannedOutflow,
+      confirmed_expenses: confirmedExpenses,
+      net_confirmed_runway: netConfirmedRunway,
+      forecast_runway: forecastRunway,
+      runway_days: '',
+      source_event_ids: Object.keys(sourceEventIdsMap).join(','),
+      source_allocation_ids: sourceAllocationIds.join(','),
+      source_expense_ids: sourceExpenseIds.join(','),
+      calculation_version: 'mvp_manual_runway_v1',
+      created_by: 'runway_manual_operator',
+      notes: 'Manual runway snapshot from confirmed MAYMUN_* rows'
+    }, {
+      runId: runId,
+      actor: 'runway_manual_operator',
+      __ownerApprovedWrite: true
+    });
+
+    const after = getMaymunAssetLayerRowCounts();
+    const delta = computeMaymunRowCountDelta(before, after);
+
+    result.snapshot_id = appended.snapshot_id;
+    result.asset_code = selectedAssetCode;
+    result.action = appended.action;
+    result.row_delta = delta;
+    result.debug_log_stages.push('appendMaymunRunwaySnapshot');
+
+    const message = [
+      'Runway snapshot created.',
+      '',
+      `Run ID: ${runId}`,
+      `Asset: ${selectedAssetCode}`,
+      `Confirmed balance: ${confirmedBalance}`,
+      `Planned outflow: ${plannedOutflow}`,
+      `Confirmed expenses: ${confirmedExpenses}`,
+      `Net runway: ${netConfirmedRunway}`
+    ].join('\n');
+
+    ui.alert(message);
+    Logger.log(result);
+    return result;
+  } finally {
+    exitMaymunOwnerApprovedWriteContext_();
   }
 }
 

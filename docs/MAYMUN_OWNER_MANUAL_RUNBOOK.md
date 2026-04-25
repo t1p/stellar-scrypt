@@ -37,12 +37,27 @@
 
 Идемпотентность transfer-backed событий: дедуп по `tx_hash + op_id`.
 
+Дополнительно для ручной цепочки allocation/runway:
+
+- `runMaymunAssetLayerCreateAllocationFromSelectedDecision()`:
+  - пишет только при `decision_status=approved` и `owner_go_status=approved`;
+  - использует `upsertMaymunAllocation()` с ключом `decision_id + bucket + allocation_type`;
+  - маппинг MVP: `bucket=runway`, `allocation_status=confirmed`, `allocation_type=planned_inflow` только для `record_income`, иначе `planned_outflow`.
+- `runMaymunAssetLayerCreateRunwaySnapshot()`:
+  - агрегирует только подтверждённые строки (`allocation_status=confirmed`, `expense_status in (paid, confirmed)`);
+  - создаёт append-only запись в `MAYMUN_RUNWAY`;
+  - считает `net_confirmed_runway` и `forecast_runway`;
+  - использует один `asset_code` за запуск (`USDC` или первый подтверждённый).
+
 ## Пошаговый запуск (Apps Script UI)
 
 1. Откройте таблицу и дождитесь меню `Stellar`.
 2. При необходимости выполните `MAYMUN: Dry-run init/check листов`.
 3. Запустите `MAYMUN: Owner-approved manual write profile`.
-4. Проверьте `DEBUG_LOG` по `run_id` текущего запуска.
+4. Для цепочки после фиксации transfer выполните:
+   - `MAYMUN: Create allocation from selected DECISION` (на выбранной строке листа `MAYMUN_DECISIONS`);
+   - `MAYMUN: Create runway snapshot`.
+5. Проверьте `DEBUG_LOG` по `run_id` текущего запуска.
 
 ## Precheck (обязательный)
 

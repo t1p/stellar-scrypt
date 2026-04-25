@@ -198,6 +198,18 @@
 - Postcheck: row deltas, `DEBUG_LOG` rows, список add/update, repeat/dedup check по `tx_hash + op_id`.
 - Ограничения: только Apps Script UI/manual operator; не для cron, не для unattended CLI (`clasp run`), merge status остаётся hold.
 
+32. **MAYMUN: Create allocation from selected DECISION** → [`runMaymunAssetLayerCreateAllocationFromSelectedDecision()`](clasp/Резиденты%20Мабиз.js)
+- Что делает: на активном листе `MAYMUN_DECISIONS` берёт выбранную строку, проверяет обязательные поля и создаёт/обновляет allocation в `MAYMUN_ALLOCATIONS` через `upsertMaymunAllocation()`.
+- Условия записи: `decision_status=approved` и `owner_go_status=approved`; иначе запись блокируется с `allocation_blocked_pending_approval`.
+- Маппинг MVP: `bucket=runway`, `allocation_status=confirmed`, `allocation_type=planned_inflow` только для `decision_type=record_income`, иначе `planned_outflow`.
+- Дедуп: ключ `decision_id + bucket + allocation_type` (повторный запуск не создаёт дубль).
+
+33. **MAYMUN: Create runway snapshot** → [`runMaymunAssetLayerCreateRunwaySnapshot()`](clasp/Резиденты%20Мабиз.js)
+- Что делает: агрегирует подтверждённые данные из `MAYMUN_ALLOCATIONS` и `MAYMUN_EXPENSES`, формирует append-only snapshot в `MAYMUN_RUNWAY`.
+- Формулы MVP: `net_confirmed_runway = confirmed_balance - planned_outflow - confirmed_expenses`, `forecast_runway = confirmed_balance - planned_outflow`.
+- В расчёт включаются только `allocation_status=confirmed` и `expense_status in (paid, confirmed)`.
+- Валюта MVP: `USDC` или первый найденный `asset_code` среди подтверждённых allocations.
+
 ## Рекомендуемый порядок запуска для новой таблицы
 
 1. Подготовить `CONST` (ключи Stellar/ClickUp) по требованиям из [`README.md`](README.md:23).
@@ -211,7 +223,11 @@
 9. После [`syncResidentTracking()`](clasp/Резиденты%20Мабиз.js) собрать RT-витрины: [`buildResidentTimeline()`](clasp/Резиденты%20Мабиз.js:1630), [`buildTokenFlows()`](clasp/Резиденты%20Мабиз.js:1750), [`buildIssuerStructure()`](clasp/Резиденты%20Мабиз.js:1865).
 10. Account metadata: при необходимости запускать [`updateAccountCreationDetails()`](clasp/Резиденты%20Мабиз.js) и [`syncAccountsMeta()`](clasp/Резиденты%20Мабиз.js).
 11. Сборка отчётов: **Собрать FACT_MONTHLY** → [`buildFactMonthly()`](clasp/Резиденты%20Мабиз.js:2276), **Собрать KPI_RAW** → [`buildKpiRaw()`](clasp/Резиденты%20Мабиз.js:2406).
-12. Контроль результата по листу `DEBUG_LOG` через [`writeDebugLog()`](clasp/Резиденты%20Мабиз.js:1307).
+12. MAYMUN manual chain после фиксации transfer:
+   - `TRANSFERS -> MAYMUN_EVENTS`;
+   - `MAYMUN_DECISIONS -> MAYMUN_ALLOCATIONS`;
+   - `MAYMUN_* -> MAYMUN_RUNWAY`.
+13. Контроль результата по листу `DEBUG_LOG` через [`writeDebugLog()`](clasp/Резиденты%20Мабиз.js:1307).
 
 ## Безопасность и данные
 

@@ -210,11 +210,11 @@
 33. **MAYMUN: Create allocation from selected EVENT** → [`runMaymunAssetLayerCreateAllocationFromSelectedEvent()`](clasp/Резиденты%20Мабиз.js) (v1.0, 2026-04-25)
 - Что делает: на активном листе `MAYMUN_EVENTS` берёт выбранную строку, проверяет обязательные поля и создаёт allocation в `MAYMUN_ALLOCATIONS` прямо из confirmed события (без промежуточного decision).
 - Условия записи: `event_status=confirmed` и `project_id` разрешён (не `UNMAPPED`, `AMBIGUOUS`, `UNKNOWN`, пусто); иначе запись блокируется.
-- Маппинг: `bucket=runway`, `allocation_status=confirmed`, `decision_id` пусто (нет decision для confirmed event).
+- Маппинг: `bucket=runway`, `allocation_status=confirmed`, synthetic `decision_id` вида `dec_<event_id>_confirmed_event_mvp_v1` (без создания строки в `MAYMUN_DECISIONS`).
 - `allocation_type`: по `event_type` и `direction`: `dividend_received`/`funding_received`/`direction=in` → `planned_inflow`, иначе → `planned_outflow`.
 - Дедуп: ключ `event_id + bucket + allocation_type` (повторный запуск не создаёт дубль).
 - Защита от противоположного типа: если для того же `event_id + bucket` уже существует allocation с другим `allocation_type`, новая запись блокируется до ручного разрешения конфликта.
-- Заполняет `created_by=selected_event_manual_operator`, `notes=Created from confirmed MAYMUN_EVENTS row (no decision required)`.
+- Заполняет `created_by=selected_event_manual_operator`, `notes` с явной пометкой: allocation создана напрямую из confirmed event без decision row.
 
 34. **MAYMUN: Create runway snapshot** → [`runMaymunAssetLayerCreateRunwaySnapshot()`](clasp/Резиденты%20Мабиз.js)
 - Что делает: на активном листе `MAYMUN_ALLOCATIONS` требует выбранную ровно одну data-row, берёт из неё `asset_code` и формирует append-only snapshot в `MAYMUN_RUNWAY` только в этом asset scope.

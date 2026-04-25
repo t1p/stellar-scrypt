@@ -53,10 +53,10 @@
    - работает только для событий с `event_status=confirmed` (например, `IN + Dividend` с resolved `project_id`);
    - блокирует, если `event_status != confirmed` — для `manual_review` используйте путь A через DECISION;
    - блокирует, если `project_id` неразрешён (`UNMAPPED`, `AMBIGUOUS`, `UNKNOWN`, пусто) — используйте resolved `project_id`;
-   - использует `upsertMaymunAllocation()` с ключом `event_id + bucket + allocation_type`;
-   - маппинг: `bucket=runway`, `allocation_status=confirmed`, `decision_id` пусто (нет decision для confirmed event);
+   - использует `upsertMaymunAllocation()` со synthetic `decision_id`, стабильно вычисляемым от `event_id` (`dec_<event_id>_confirmed_event_mvp_v1`), без создания строки в `MAYMUN_DECISIONS`;
+   - маппинг: `bucket=runway`, `allocation_status=confirmed`, `decision_id=synthetic`;
    - `allocation_type` определяется по `event_type` и `direction`: `dividend_received`/`funding_received`/`direction=in` → `planned_inflow`, иначе → `planned_outflow`;
-   - заполняет `created_by=selected_event_manual_operator`, `notes=Created from confirmed MAYMUN_EVENTS row (no decision required)`;
+   - заполняет `created_by=selected_event_manual_operator`, `notes` с явной пометкой, что allocation создана напрямую из confirmed event без decision row;
    - если для того же `event_id + bucket` уже есть allocation с противоположным `allocation_type`, запись блокируется до ручного разрешения конфликта.
 
 - `runMaymunAssetLayerCreateRunwaySnapshot()`:
@@ -89,7 +89,7 @@
    **Путь B: Прямо из confirmed EVENT (для подтвержденных событий)**
    - На листе `MAYMUN_EVENTS` выберите строку с `event_status=confirmed` и resolved `project_id`.
    - Запустите `MAYMUN: Create allocation from selected EVENT`.
-   - Allocation будет создана в `MAYMUN_ALLOCATIONS` с `bucket=runway`, `allocation_status=confirmed`, `decision_id` пусто.
+   - Allocation будет создана в `MAYMUN_ALLOCATIONS` с `bucket=runway`, `allocation_status=confirmed` и synthetic `decision_id` (без создания строки в `MAYMUN_DECISIONS`).
 
 6. После создания allocation запустите `MAYMUN: Create runway snapshot` (на выбранной строке листа `MAYMUN_ALLOCATIONS`).
 

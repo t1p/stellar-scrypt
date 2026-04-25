@@ -154,8 +154,8 @@ Rollback и пошаговый безопасный запуск описаны 
    - Блокирует, если `project_id` неразрешён (`UNMAPPED`, `AMBIGUOUS`, `UNKNOWN`, пусто) — используйте resolved `project_id`.
    - Определяет `allocation_type` по `event_type` и `direction`: `dividend_received`/`funding_received`/`direction=in` → `planned_inflow`, иначе → `planned_outflow`.
    - Проверяет conflicting allocation type по `event_id + bucket` (аналогично decision-пути).
-   - Создаёт allocation с `allocation_status=confirmed`, `decision_id` пусто (нет decision для confirmed event).
-   - Заполняет `created_by=selected_event_manual_operator`, `notes=Created from confirmed MAYMUN_EVENTS row (no decision required)`.
+   - Создаёт allocation с `allocation_status=confirmed` и synthetic `decision_id` вида `dec_<event_id>_confirmed_event_mvp_v1` (строка в `MAYMUN_DECISIONS` при этом не создаётся).
+   - Заполняет `created_by=selected_event_manual_operator`, `notes` с явной пометкой, что запись создана напрямую из confirmed event без decision row.
 
 3. `MAYMUN_EVENTS / MAYMUN_ALLOCATIONS / MAYMUN_EXPENSES -> MAYMUN_RUNWAY` через `MAYMUN: Create runway snapshot`.
    - Запускать с активного листа `MAYMUN_ALLOCATIONS` и выбранной ровно одной data-row.

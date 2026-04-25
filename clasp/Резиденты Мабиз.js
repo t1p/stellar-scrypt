@@ -6061,8 +6061,8 @@ MAYMUN_DECISIONS ${delta[SHEET_MAYMUN_DECISIONS]?.delta >= 0 ? '+' : ''}${delta[
   }
 }
 
-// Confirmed event -> allocation flow (v1.0, 2026-04-25T14:38:00Z): Direct allocation creation from confirmed MAYMUN_EVENTS
-// Handles: event_status=confirmed (e.g., IN + Dividend with resolved project_id) -> MAYMUN_ALLOCATIONS + MAYMUN_RUNWAY
+// Confirmed event -> allocation flow (v1.1, 2026-04-25T14:56:00Z): direct allocation creation from confirmed MAYMUN_EVENTS
+// Uses synthetic decision_id for validated allocation upsert without creating MAYMUN_DECISIONS row.
 function runMaymunAssetLayerCreateAllocationFromSelectedEvent() {
   assertManualUiContext_();
   
@@ -6287,8 +6287,9 @@ function runMaymunAssetLayerCreateAllocationFromSelectedEvent() {
     const previewRunId = `${runId}_preview`;
     const previewOpts = { dryRun: true, actor: 'selected_event_manual_operator', runId: previewRunId };
     
+    const syntheticDecisionId = `dec_${sanitizeForId_(eventId)}_confirmed_event_mvp_v1`;
     const allocation = {
-      decision_id: '',
+      decision_id: syntheticDecisionId,
       event_id: eventId,
       project_id: projectId,
       resident_id: String(eventData.resident_id || '').trim(),
@@ -6301,7 +6302,7 @@ function runMaymunAssetLayerCreateAllocationFromSelectedEvent() {
       confirmed_amount: amount,
       effective_at: now,
       created_by: 'selected_event_manual_operator',
-      notes: 'Created from confirmed MAYMUN_EVENTS row (no decision required)'
+      notes: `Created directly from confirmed MAYMUN_EVENTS row without MAYMUN_DECISIONS row; synthetic decision_id=${syntheticDecisionId}`
     };
     
     const previewAllocation = upsertMaymunAllocation(allocation, previewOpts);

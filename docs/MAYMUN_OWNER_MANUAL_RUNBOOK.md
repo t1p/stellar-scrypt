@@ -74,8 +74,12 @@
 
 1. Откройте таблицу и дождитесь меню `Stellar`.
 2. При необходимости выполните `MAYMUN: Dry-run init/check листов`.
-3. Запустите `MAYMUN: Owner-approved manual write profile`.
-4. Для цепочки после фиксации transfer выполните один из двух путей:
+3. Для полуавтоматического режима запустите `MAYMUN: Precheck unprocessed TRANSFERS`.
+   - Результат: только анализ и отчёт (`TRANSFERS -> candidates -> dry-run -> report`).
+   - Разрешённая запись: только в `MAYMUN_RUNS` и `DEBUG_LOG`.
+   - Запрещено: запись в `MAYMUN_EVENTS`, `MAYMUN_DECISIONS`, `MAYMUN_ALLOCATIONS`, `MAYMUN_EXPENSES`, `MAYMUN_RUNWAY`.
+4. Запустите `MAYMUN: Owner-approved manual write profile`.
+5. Для цепочки после фиксации transfer выполните один из двух путей:
 
    **Путь A: Через DECISION (для manual_review событий)**
    - На листе `MAYMUN_DECISIONS` выберите строку с `decision_status=approved` и `owner_go_status=approved`.
@@ -87,7 +91,7 @@
    - Запустите `MAYMUN: Create allocation from selected EVENT`.
    - Allocation будет создана в `MAYMUN_ALLOCATIONS` с `bucket=runway`, `allocation_status=confirmed`, `decision_id` пусто.
 
-5. После создания allocation запустите `MAYMUN: Create runway snapshot` (на выбранной строке листа `MAYMUN_ALLOCATIONS`).
+6. После создания allocation запустите `MAYMUN: Create runway snapshot` (на выбранной строке листа `MAYMUN_ALLOCATIONS`).
 
 Правило блокера для selected TRANSFER:
 
@@ -95,7 +99,7 @@
 - Для такого события обязательно создаётся `MAYMUN_DECISIONS` с `decision_status=pending_approval`, `owner_go_status=pending`, `reason=project_mapping_required`.
 - `IN + Dividend` не даёт auto-confirmed путь при неразрешённом `project_id`: сначала нужен ручной mapping на проект из `RESIDENTS`.
 
-6. Проверьте `DEBUG_LOG` по `run_id` текущего запуска.
+7. Проверьте `DEBUG_LOG` по `run_id` текущего запуска.
 
 ## Precheck (обязательный)
 

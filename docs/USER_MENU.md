@@ -224,6 +224,13 @@
 - Duplicate blocker: повторный запуск блокируется при совпадении `asset_code` + нормализованного набора `source_allocation_ids`; пишется `DEBUG_LOG` stage `runway_snapshot.duplicate_blocked` и оператор получает alert.
 - Legacy alias fields в новой строке заполняются автоматически: `snapshot_date`, `confirmed_liquidity`, `pending_liquidity=0`, `liquidatable_assets_value`, `status=manual_snapshot`, `comment`; поля burn/model (`monthly_burn`, `runway_days`, `self_sufficiency_ratio`) остаются пустыми в MVP.
 
+35. **MAYMUN: Precheck unprocessed TRANSFERS** → [`runMaymunAssetLayerPrecheckUnprocessedTransfers()`](clasp/Резиденты%20Мабиз.js) (v1.0, 2026-04-25)
+- Что делает: в полуавтоматическом режиме сканирует `TRANSFERS`, находит необработанные строки (`tx_hash + op_id`, отсутствующие в `MAYMUN_EVENTS.transfer_key`), применяет dry-run классификацию и формирует отчёт без записи в `MAYMUN_*` бизнес-слои.
+- Что пишет: только служебные слои `MAYMUN_RUNS` и `DEBUG_LOG` (`stage: scan / classify / summarize`).
+- Классы кандидатов: `confirmed_candidate`, `manual_review`, `ignored`; для `manual_review` рассчитывается ожидаемое создание decision (`pending_approval`).
+- Вывод оператору: `Logger.log` + `SpreadsheetApp.getUi().alert()` с блоками `CANDIDATES`, `EXPECTED`, `ASSET_SCOPE`, `RISKS`, `NEXT ACTION`.
+- Ограничения: только ручной запуск из UI, без cron/triggers/live projection, без `clasp run`, без изменения runtime/credentials/providers.
+
 ## Рекомендуемый порядок запуска для новой таблицы
 
 1. Подготовить `CONST` (ключи Stellar/ClickUp) по требованиям из [`README.md`](README.md:23).

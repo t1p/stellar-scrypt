@@ -29,6 +29,7 @@ const SHEET_MAYMUN_DECISIONS = 'MAYMUN_DECISIONS';
 const SHEET_MAYMUN_ALLOCATIONS = 'MAYMUN_ALLOCATIONS';
 const SHEET_MAYMUN_EXPENSES = 'MAYMUN_EXPENSES';
 const SHEET_MAYMUN_RUNWAY = 'MAYMUN_RUNWAY';
+const SHEET_MAYMUN_RUNS = 'MAYMUN_RUNS';
 
 const MAYMUN_EVENTS_HEADERS = [
   'event_id', 'source_type', 'source_sheet', 'source_row', 'tx_hash', 'op_id', 'transfer_key',
@@ -59,6 +60,12 @@ const MAYMUN_RUNWAY_HEADERS = [
   'snapshot_id', 'snapshot_at', 'scope_type', 'scope_id', 'asset_code', 'confirmed_balance', 'planned_inflow',
   'planned_outflow', 'confirmed_expenses', 'net_confirmed_runway', 'forecast_runway', 'runway_days',
   'source_event_ids', 'source_allocation_ids', 'source_expense_ids', 'calculation_version', 'created_by', 'notes'
+];
+
+const MAYMUN_RUNS_HEADERS = [
+  'run_id', 'run_type', 'status', 'started_at', 'finished_at',
+  'candidate_count', 'expected_events', 'expected_decisions', 'expected_allocations',
+  'expected_runway_impact_json', 'asset_scope', 'operator', 'notes', 'error'
 ];
 
 const MEMO_CACHE_TTL = 21600; // 6 часов
@@ -122,6 +129,7 @@ function onOpen() {
     .addItem('MAYMUN: Create allocation from selected DECISION', 'runMaymunAssetLayerCreateAllocationFromSelectedDecision')
     .addItem('MAYMUN: Create allocation from selected EVENT', 'runMaymunAssetLayerCreateAllocationFromSelectedEvent')
     .addItem('MAYMUN: Create runway snapshot', 'runMaymunAssetLayerCreateRunwaySnapshot')
+    .addItem('MAYMUN: Precheck unprocessed TRANSFERS', 'runMaymunAssetLayerPrecheckUnprocessedTransfers')
     .addSeparator()
     .addItem('Обновить Created данные аккаунтов', 'updateAccountCreationDetails')
     .addItem('Обновить метаданные аккаунтов', 'syncAccountsMeta')
@@ -2120,6 +2128,26 @@ function ensureMaymunExpensesSheet_(options) {
 
 function ensureMaymunRunwaySheet_(options) {
   return ensureSheetWithHeaders_(SHEET_MAYMUN_RUNWAY, MAYMUN_RUNWAY_HEADERS, options);
+}
+
+function ensureMaymunRunsSheet_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(SHEET_MAYMUN_RUNS);
+  let created = false;
+
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_MAYMUN_RUNS);
+    sheet.appendRow(MAYMUN_RUNS_HEADERS);
+    created = true;
+  }
+
+  const shape = getSheetByHeaderMap_(sheet);
+  const missing = validateSheetHeaders_(shape.headers, MAYMUN_RUNS_HEADERS);
+  if (missing.length) {
+    sheet.getRange(1, shape.headers.length + 1, 1, missing.length).setValues([missing]);
+  }
+
+  return { sheet: sheet, created: created, missingHeaders: missing };
 }
 
 function ensureMaymunAssetLayerSheets(options) {
@@ -5323,6 +5351,390 @@ function isUnresolvedProjectId_(projectId) {
     'NONE': true
   };
   return !!unresolved[normalized];
+}
+
+function buildMaymunTransferEventCandidate_(transferData, selectedRow, now, runId) {
+  const direction = String(transferData.direction || '').trim().toUpperCase();
+  const transferClass = String(transferData.class || '').trim();
+  const projectId = String(transferData.project_id || '').trim();
+  const isProjectMappingRequired = isUnresolvedProjectId_(projectId);
+
+  let eventType = 'transfer_detected';
+  let eventStatus = 'manual_review';
+  let confidence = 'low';
+
+  if (direction === 'IN' && transferClass === 'Dividend') {
+    eventType = 'dividend_received';
+    eventStatus = 'confirmed';
+    confidence = 'high';
+  } else if (direction === 'IN' && transferClass === 'Funding') {
+    eventType = 'funding_received';
+    eventStatus = 'manual_review';
+    confidence = 'medium';
+  } else if (direction === 'OUT') {
+    eventType = 'outgoing_transfer';
+    eventStatus = 'manual_review';
+    confidence = 'medium';
+  }
+
+  if (isProjectMappingRequired) {
+    eventStatus = 'manual_review';
+    confidence = 'low';
+    writeDebugLog({
+      run_id: runId,
+      module: 'maymun_asset_layer',
+      timestamp: now,
+      stage: 'selectedTransfer.project_mapping_required',
+      fundKey: 'BLOCKER',
+      details: `project_id=${projectId || '<empty>'}; class=${transferClass}; direction=${direction}; forcing manual_review`
+    });
+  }
+
+  const txHash = String(transferData.tx_hash || '').trim();
+  const opId = String(transferData.op_id || '').trim();
+  const event = {
+    source_type: 'transfer',
+    source_sheet: SHEET_TRANSFERS,
+    source_row: String(selectedRow),
+    tx_hash: txHash,
+    op_id: opId,
+    transfer_key: `${txHash}:${opId}`,
+    event_type: eventType,
+    source_tx_hash: txHash,
+    source_op_id: opId,
+    event_time: String(transferData.datetime || '').trim(),
+    gross_amount: String(transferData.amount || '').trim(),
+    currency_code: String(transferData.asset_code || '').trim(),
+    project_id: projectId,
+    resident_id: '',
+    account_id: String(transferData.fund_account_key || '').trim(),
+    asset_code: String(transferData.asset_code || '').trim(),
+    asset_issuer: String(transferData.asset_issuer || '').trim(),
+    amount: String(transferData.amount || '').trim(),
+    direction: direction.toLowerCase(),
+    event_status: eventStatus,
+    confidence: confidence,
+    occurred_at: String(transferData.datetime || '').trim(),
+    detected_at: now,
+    created_at: now,
+    created_by: 'selected_transfer_manual_operator',
+    notes: `from_label=${transferData.from_label || ''}, to_label=${transferData.to_label || ''}, memo=${transferData.memo || ''}, class=${transferClass}${isProjectMappingRequired ? ', reason=project_mapping_required' : ''}`
+  };
+
+  return {
+    event: event,
+    eventStatus: eventStatus,
+    isProjectMappingRequired: isProjectMappingRequired,
+    direction: direction,
+    transferClass: transferClass
+  };
+}
+
+// Precheck flow (v1.0, 2026-04-25T14:45:00Z): scan unprocessed TRANSFERS and produce manual-only recommendations.
+function runMaymunAssetLayerPrecheckUnprocessedTransfers() {
+  assertManualUiContext_();
+
+  const runId = newRunId_();
+  const startedAt = stableNowIso_();
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  try {
+    const transfersSheet = ss.getSheetByName(SHEET_TRANSFERS);
+    const eventsSheet = ss.getSheetByName(SHEET_MAYMUN_EVENTS);
+    ensureMaymunRunsSheet_();
+
+    if (!transfersSheet || transfersSheet.getLastRow() <= 1) {
+      const nothingMsg = 'Nothing to process: TRANSFERS is empty or has no data rows.';
+      writeDebugLog({ run_id: runId, module: 'maymun_asset_layer', timestamp: startedAt, stage: 'scan', fundKey: SHEET_TRANSFERS, details: nothingMsg });
+      ui.alert(nothingMsg);
+      Logger.log(nothingMsg);
+      return { runId: runId, candidate_count: 0, expected_events: 0, expected_decisions: 0 };
+    }
+
+    const transfersShape = getSheetByHeaderMap_(transfersSheet);
+    const requiredTransferHeaders = ['tx_hash', 'op_id', 'direction', 'amount', 'asset_code'];
+    const missingTransferHeaders = validateSheetHeaders_(transfersShape.headers, requiredTransferHeaders);
+    if (missingTransferHeaders.length) {
+      throw new Error('TRANSFERS headers missing: ' + missingTransferHeaders.join(', '));
+    }
+
+    const transferData = transfersSheet.getRange(2, 1, transfersSheet.getLastRow() - 1, transfersSheet.getLastColumn()).getValues();
+    const existingTransferKeys = new Set();
+
+    if (eventsSheet && eventsSheet.getLastRow() > 1) {
+      const eventShape = getSheetByHeaderMap_(eventsSheet);
+      const transferKeyIdx = eventShape.headerMap['transfer_key'];
+      const txHashIdx = eventShape.headerMap['tx_hash'];
+      const opIdIdx = eventShape.headerMap['op_id'];
+      const eventsData = eventsSheet.getRange(2, 1, eventsSheet.getLastRow() - 1, eventsSheet.getLastColumn()).getValues();
+      for (let i = 0; i < eventsData.length; i++) {
+        const keyByTransfer = transferKeyIdx !== undefined ? String(eventsData[i][transferKeyIdx] || '').trim() : '';
+        const keyByParts = (txHashIdx !== undefined && opIdIdx !== undefined)
+          ? `${String(eventsData[i][txHashIdx] || '').trim()}:${String(eventsData[i][opIdIdx] || '').trim()}`
+          : '';
+        const key = keyByTransfer || keyByParts;
+        if (key && key !== ':') existingTransferKeys.add(key);
+      }
+    }
+
+    const idx = transfersShape.headerMap;
+    const candidateTransfers = [];
+    const ignoredRows = [];
+
+    for (let i = 0; i < transferData.length; i++) {
+      const row = transferData[i];
+      const rowNumber = i + 2;
+      const txHash = String(row[idx['tx_hash']] || '').trim();
+      const opId = String(row[idx['op_id']] || '').trim();
+      const direction = String(row[idx['direction']] || '').trim().toUpperCase();
+      const amount = String(row[idx['amount']] || '').trim();
+      const assetCode = String(row[idx['asset_code']] || '').trim();
+      const transferKey = `${txHash}:${opId}`;
+
+      if (!txHash || !opId || !amount || !assetCode || (direction !== 'IN' && direction !== 'OUT')) {
+        ignoredRows.push({ row: rowNumber, reason: 'missing_required_fields_or_invalid_direction' });
+        continue;
+      }
+
+      if (existingTransferKeys.has(transferKey)) {
+        continue;
+      }
+
+      candidateTransfers.push({ row: rowNumber, rowData: row, transferKey: transferKey });
+    }
+
+    writeDebugLog({
+      run_id: runId,
+      module: 'maymun_asset_layer',
+      timestamp: stableNowIso_(),
+      stage: 'scan',
+      fundKey: SHEET_TRANSFERS,
+      rows_fetched: transferData.length,
+      details: JSON.stringify({
+        candidate_count: candidateTransfers.length,
+        ignored_count: ignoredRows.length,
+        processed_transfer_keys: existingTransferKeys.size
+      })
+    });
+
+    const candidateEvents = [];
+    const candidateDecisions = [];
+    const risks = [];
+    const assetScopeMap = {};
+    let confirmedCount = 0;
+    let manualReviewCount = 0;
+
+    for (let i = 0; i < candidateTransfers.length; i++) {
+      const item = candidateTransfers[i];
+      const row = item.rowData;
+      const transferDataObj = {
+        tx_hash: row[idx['tx_hash']],
+        op_id: row[idx['op_id']],
+        amount: row[idx['amount']],
+        asset_code: row[idx['asset_code']],
+        direction: row[idx['direction']],
+        project_id: idx['project_id'] !== undefined ? row[idx['project_id']] : '',
+        fund_account_key: idx['fund_account_key'] !== undefined ? row[idx['fund_account_key']] : '',
+        class: idx['class'] !== undefined ? row[idx['class']] : '',
+        datetime: idx['datetime'] !== undefined ? row[idx['datetime']] : '',
+        asset_issuer: idx['asset_issuer'] !== undefined ? row[idx['asset_issuer']] : '',
+        from_label: idx['from_label'] !== undefined ? row[idx['from_label']] : '',
+        to_label: idx['to_label'] !== undefined ? row[idx['to_label']] : '',
+        memo: idx['memo'] !== undefined ? row[idx['memo']] : ''
+      };
+
+      const built = buildMaymunTransferEventCandidate_(transferDataObj, item.row, startedAt, runId);
+      candidateEvents.push(built.event);
+      assetScopeMap[String(built.event.asset_code || '').trim() || 'UNKNOWN'] = true;
+
+      if (!String(built.event.asset_issuer || '').trim()) {
+        risks.push('missing asset_issuer');
+      }
+      if (isUnresolvedProjectId_(built.event.project_id)) {
+        risks.push('ambiguous project mapping');
+      }
+
+      if (built.eventStatus === 'confirmed') {
+        confirmedCount += 1;
+        writeDebugLog({
+          run_id: runId,
+          module: 'maymun_asset_layer',
+          timestamp: stableNowIso_(),
+          stage: 'classify',
+          fundKey: SHEET_TRANSFERS,
+          details: `row=${item.row}; transfer_key=${item.transferKey}; class=confirmed_candidate`
+        });
+      } else {
+        manualReviewCount += 1;
+        const decisionReason = built.isProjectMappingRequired ? 'project_mapping_required' : 'manual_review_required';
+        const decisionNotes = built.isProjectMappingRequired
+          ? `project_mapping_required: project_id=${built.event.project_id || '<empty>'}; map transfer to a RESIDENTS project before approval; ${built.event.notes}`
+          : built.event.notes;
+        candidateDecisions.push({
+          event_id: built.event.event_id || buildMaymunEventId_(built.event),
+          decision_type: 'manual_review',
+          decision_status: 'pending_approval',
+          policy_version: 'mvp_selected_transfer_v1',
+          project_id: built.event.project_id,
+          resident_id: '',
+          amount: built.event.amount,
+          asset_code: built.event.asset_code,
+          requires_owner_go: 'TRUE',
+          owner_go_status: 'pending',
+          reason: decisionReason,
+          notes: decisionNotes
+        });
+        writeDebugLog({
+          run_id: runId,
+          module: 'maymun_asset_layer',
+          timestamp: stableNowIso_(),
+          stage: 'classify',
+          fundKey: SHEET_TRANSFERS,
+          details: `row=${item.row}; transfer_key=${item.transferKey}; class=manual_review; reason=${decisionReason}`
+        });
+      }
+    }
+
+    const assetCodes = Object.keys(assetScopeMap).filter(function (v) { return !!v; });
+    const multiAssetDetected = assetCodes.length > 1;
+    if (multiAssetDetected) risks.push('multi-asset batch');
+
+    const expectedRunwayImpact = {};
+    for (let i = 0; i < assetCodes.length; i++) {
+      const code = assetCodes[i];
+      expectedRunwayImpact[code] = { expected_events: 0, expected_decisions: 0 };
+    }
+    for (let i = 0; i < candidateEvents.length; i++) {
+      const code = String(candidateEvents[i].asset_code || '').trim() || 'UNKNOWN';
+      if (!expectedRunwayImpact[code]) expectedRunwayImpact[code] = { expected_events: 0, expected_decisions: 0 };
+      expectedRunwayImpact[code].expected_events += 1;
+    }
+    for (let i = 0; i < candidateDecisions.length; i++) {
+      const code = String(candidateDecisions[i].asset_code || '').trim() || 'UNKNOWN';
+      if (!expectedRunwayImpact[code]) expectedRunwayImpact[code] = { expected_events: 0, expected_decisions: 0 };
+      expectedRunwayImpact[code].expected_decisions += 1;
+    }
+
+    const runStatus = candidateTransfers.length === 0 ? 'failed' : 'ready_for_review';
+    const finishedAt = stableNowIso_();
+    const assetScopeValue = multiAssetDetected ? 'MULTI' : (assetCodes[0] || 'UNKNOWN');
+    const uniqueRisks = Array.from(new Set(risks));
+
+    const runsSheetResult = ensureMaymunRunsSheet_();
+    const runsSheet = runsSheetResult.sheet;
+    const runsShape = getSheetByHeaderMap_(runsSheet);
+    const runRecord = {
+      run_id: runId,
+      run_type: 'precheck',
+      status: runStatus,
+      started_at: startedAt,
+      finished_at: finishedAt,
+      candidate_count: candidateTransfers.length,
+      expected_events: candidateEvents.length,
+      expected_decisions: candidateDecisions.length,
+      expected_allocations: 0,
+      expected_runway_impact_json: JSON.stringify(expectedRunwayImpact),
+      asset_scope: assetScopeValue,
+      operator: Session.getActiveUser().getEmail() || 'manual_operator',
+      notes: uniqueRisks.join('; '),
+      error: ''
+    };
+    const runRow = mapObjectToRowByHeader_(runRecord, runsShape.headers);
+    runsSheet.getRange(runsSheet.getLastRow() + 1, 1, 1, runRow.length).setValues([runRow]);
+
+    writeDebugLog({
+      run_id: runId,
+      module: 'maymun_asset_layer',
+      timestamp: finishedAt,
+      stage: 'summarize',
+      fundKey: SHEET_MAYMUN_RUNS,
+      details: JSON.stringify({
+        candidate_count: candidateTransfers.length,
+        confirmed: confirmedCount,
+        manual_review: manualReviewCount,
+        ignored: ignoredRows.length,
+        asset_scope: assetScopeValue,
+        warnings: uniqueRisks
+      })
+    });
+
+    const report = [
+      `RUN_ID: ${runId}`,
+      '',
+      `CANDIDATES: ${candidateTransfers.length}`,
+      `CONFIRMED: ${confirmedCount}`,
+      `MANUAL_REVIEW: ${manualReviewCount}`,
+      `IGNORED: ${ignoredRows.length}`,
+      '',
+      'EXPECTED:',
+      `MAYMUN_EVENTS +${candidateEvents.length}`,
+      `MAYMUN_DECISIONS +${candidateDecisions.length}`,
+      '',
+      'ASSET_SCOPE:',
+      assetScopeValue,
+      '',
+      'RISKS:',
+      uniqueRisks.length ? uniqueRisks.map(function (r) { return `- ${r}`; }).join('\n') : '- none',
+      '',
+      'NEXT ACTION:',
+      'Run:',
+      'MAYMUN: Write selected TRANSFER',
+      'или',
+      'обработать вручную decisions'
+    ].join('\n');
+
+    Logger.log(report);
+    if (candidateTransfers.length === 0) {
+      ui.alert('Nothing to process: all eligible TRANSFERS are already processed.');
+    } else {
+      ui.alert(report);
+    }
+
+    return {
+      runId: runId,
+      candidate_count: candidateTransfers.length,
+      expected_events: candidateEvents.length,
+      expected_decisions: candidateDecisions.length,
+      expected_manual_review_count: manualReviewCount,
+      asset_scope: assetScopeValue,
+      multi_asset_detected: multiAssetDetected,
+      warnings: uniqueRisks,
+      ignored_count: ignoredRows.length
+    };
+  } catch (e) {
+    const finishedAt = stableNowIso_();
+    const errorMessage = String(e && e.message ? e.message : e);
+    writeDebugLog({ run_id: runId, module: 'maymun_asset_layer', timestamp: finishedAt, stage: 'summarize', fundKey: 'ERROR', details: `precheck_failed: ${errorMessage}` });
+
+    try {
+      const runsSheet = ensureMaymunRunsSheet_().sheet;
+      const runsShape = getSheetByHeaderMap_(runsSheet);
+      const failureRecord = {
+        run_id: runId,
+        run_type: 'precheck',
+        status: 'failed',
+        started_at: startedAt,
+        finished_at: finishedAt,
+        candidate_count: 0,
+        expected_events: 0,
+        expected_decisions: 0,
+        expected_allocations: 0,
+        expected_runway_impact_json: '{}',
+        asset_scope: '',
+        operator: Session.getActiveUser().getEmail() || 'manual_operator',
+        notes: '',
+        error: errorMessage
+      };
+      const row = mapObjectToRowByHeader_(failureRecord, runsShape.headers);
+      runsSheet.getRange(runsSheet.getLastRow() + 1, 1, 1, row.length).setValues([row]);
+    } catch (inner) {
+      Logger.log('Failed to persist MAYMUN_RUNS failure row: ' + String(inner));
+    }
+
+    ui.alert('Precheck failed: ' + errorMessage);
+    throw e;
+  }
 }
 
 // Selected transfer flow update (v1.2, 2026-04-25T09:37:00Z): unresolved project_id is a manual blocker.

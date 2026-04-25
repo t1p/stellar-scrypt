@@ -119,6 +119,20 @@ Owner-approved write profile делает:
 
 Rollback и пошаговый безопасный запуск описаны в [`docs/MAYMUN_OWNER_MANUAL_RUNBOOK.md`](docs/MAYMUN_OWNER_MANUAL_RUNBOOK.md).
 
+### Полуавтоматический режим (precheck)
+
+Доступен отдельный ручной пункт меню: `MAYMUN: Precheck unprocessed TRANSFERS` (`runMaymunAssetLayerPrecheckUnprocessedTransfers()`).
+
+Что делает режим:
+
+- система находит необработанные строки `TRANSFERS` по критерию отсутствия `tx_hash + op_id` в `MAYMUN_EVENTS.transfer_key`;
+- применяет те же dry-run правила классификации, что и для `MAYMUN: Write selected TRANSFER`;
+- считает ожидаемые эффекты (`expected_events`, `expected_decisions`, `asset_scope`, warnings/risk list);
+- формирует отчёт для оператора (`Logger.log` + UI alert);
+- пишет только служебные слои: `MAYMUN_RUNS` и `DEBUG_LOG`.
+
+Важно: полуавтоматический precheck **не** выполняет бизнес-запись в `MAYMUN_EVENTS`, `MAYMUN_DECISIONS`, `MAYMUN_ALLOCATIONS`, `MAYMUN_EXPENSES`, `MAYMUN_RUNWAY`.
+
 ### Ручной сценарий после фиксации TRANSFER
 
 1. `TRANSFERS -> MAYMUN_EVENTS` через ручной operator flow.

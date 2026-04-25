@@ -224,7 +224,7 @@
 10. Account metadata: при необходимости запускать [`updateAccountCreationDetails()`](clasp/Резиденты%20Мабиз.js) и [`syncAccountsMeta()`](clasp/Резиденты%20Мабиз.js).
 11. Сборка отчётов: **Собрать FACT_MONTHLY** → [`buildFactMonthly()`](clasp/Резиденты%20Мабиз.js:2276), **Собрать KPI_RAW** → [`buildKpiRaw()`](clasp/Резиденты%20Мабиз.js:2406).
 12. MAYMUN manual chain после фиксации transfer:
-   - `TRANSFERS -> MAYMUN_EVENTS`;
+   - `TRANSFERS -> MAYMUN_EVENTS` (если `project_id=UNMAPPED/UNKNOWN/пусто/неразрешён`, то только `manual_review` + обязательный decision `pending_approval` с причиной `project_mapping_required`);
    - `MAYMUN_DECISIONS -> MAYMUN_ALLOCATIONS`;
    - `MAYMUN_* -> MAYMUN_RUNWAY`.
 13. Контроль результата по листу `DEBUG_LOG` через [`writeDebugLog()`](clasp/Резиденты%20Мабиз.js:1307).

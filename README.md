@@ -122,6 +122,9 @@ Rollback и пошаговый безопасный запуск описаны 
 ### Ручной сценарий после фиксации TRANSFER
 
 1. `TRANSFERS -> MAYMUN_EVENTS` через ручной operator flow.
+   - Если `project_id` неразрешён (`UNMAPPED`, `UNKNOWN`, пусто и аналоги), событие принудительно получает `event_status=manual_review` и `confidence=low`.
+   - Для такого события создаётся `MAYMUN_DECISIONS` с `decision_status=pending_approval`, `owner_go_status=pending`, `reason=project_mapping_required` и явной пометкой о необходимости маппинга на проект из `RESIDENTS`.
+   - Даже при `direction=IN` и `class=Dividend` confirmed/auto path блокируется, пока не выполнен project mapping.
 2. `MAYMUN_DECISIONS -> MAYMUN_ALLOCATIONS` через `MAYMUN: Create allocation from selected DECISION`.
 3. `MAYMUN_EVENTS / MAYMUN_ALLOCATIONS / MAYMUN_EXPENSES -> MAYMUN_RUNWAY` через `MAYMUN: Create runway snapshot`.
 

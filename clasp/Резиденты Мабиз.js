@@ -32,8 +32,9 @@ const SHEET_MAYMUN_RUNWAY = 'MAYMUN_RUNWAY';
 
 const MAYMUN_EVENTS_HEADERS = [
   'event_id', 'source_type', 'source_sheet', 'source_row', 'tx_hash', 'op_id', 'transfer_key',
+  'source_tx_hash', 'source_op_id', 'event_time', 'gross_amount', 'currency_code',
   'event_type', 'project_id', 'resident_id', 'account_id', 'asset_code', 'asset_issuer', 'amount',
-  'direction', 'event_status', 'confidence', 'occurred_at', 'detected_at', 'created_by', 'notes'
+  'direction', 'event_status', 'confidence', 'occurred_at', 'detected_at', 'created_at', 'created_by', 'notes'
 ];
 
 const MAYMUN_DECISIONS_HEADERS = [
@@ -5154,6 +5155,23 @@ function runMaymunAssetLayerCreateRunwaySnapshot() {
   }
 }
 
+function isUnresolvedProjectId_(projectId) {
+  const normalized = String(projectId || '').trim().toUpperCase();
+  if (!normalized) return true;
+  const unresolved = {
+    'UNMAPPED': true,
+    'UNKNOWN': true,
+    'AMBIGUOUS': true,
+    'UNASSIGNED': true,
+    'N/A': true,
+    'NA': true,
+    'NULL': true,
+    'NONE': true
+  };
+  return !!unresolved[normalized];
+}
+
+// Selected transfer flow update (v1.2, 2026-04-25T09:37:00Z): unresolved project_id is a manual blocker.
 function runMaymunAssetLayerWriteSelectedTransfer() {
   assertManualUiContext_();
   
@@ -5274,6 +5292,8 @@ function runMaymunAssetLayerWriteSelectedTransfer() {
     // Построить event_type по direction/class
     const direction = String(transferData.direction || '').trim().toUpperCase();
     const transferClass = String(transferData.class || '').trim();
+    const projectId = String(transferData.project_id || '').trim();
+    const isProjectMappingRequired = isUnresolvedProjectId_(projectId);
     
     let eventType = 'transfer_detected';
     let eventStatus = 'manual_review';
@@ -5292,6 +5312,19 @@ function runMaymunAssetLayerWriteSelectedTransfer() {
       eventStatus = 'manual_review';
       confidence = 'medium';
     }
+
+    if (isProjectMappingRequired) {
+      eventStatus = 'manual_review';
+      confidence = 'low';
+      writeDebugLog({
+        run_id: runId,
+        module: 'maymun_asset_layer',
+        timestamp: now,
+        stage: 'selectedTransfer.project_mapping_required',
+        fundKey: 'BLOCKER',
+        details: `project_id=${projectId || '<empty>'}; class=${transferClass}; direction=${direction}; forcing manual_review`
+      });
+    }
     
     // Построить event object
     const event = {
@@ -5302,7 +5335,12 @@ function runMaymunAssetLayerWriteSelectedTransfer() {
       op_id: String(transferData.op_id || '').trim(),
       transfer_key: `${String(transferData.tx_hash || '').trim()}:${String(transferData.op_id || '').trim()}`,
       event_type: eventType,
-      project_id: String(transferData.project_id || '').trim(),
+      source_tx_hash: String(transferData.tx_hash || '').trim(),
+      source_op_id: String(transferData.op_id || '').trim(),
+      event_time: String(transferData.datetime || '').trim(),
+      gross_amount: String(transferData.amount || '').trim(),
+      currency_code: String(transferData.asset_code || '').trim(),
+      project_id: projectId,
       resident_id: '',
       account_id: String(transferData.fund_account_key || '').trim(),
       asset_code: String(transferData.asset_code || '').trim(),
@@ -5313,8 +5351,9 @@ function runMaymunAssetLayerWriteSelectedTransfer() {
       confidence: confidence,
       occurred_at: String(transferData.datetime || '').trim(),
       detected_at: now,
+      created_at: now,
       created_by: 'selected_transfer_manual_operator',
-      notes: `from_label=${transferData.from_label || ''}, to_label=${transferData.to_label || ''}, memo=${transferData.memo || ''}, class=${transferClass}`
+      notes: `from_label=${transferData.from_label || ''}, to_label=${transferData.to_label || ''}, memo=${transferData.memo || ''}, class=${transferClass}${isProjectMappingRequired ? ', reason=project_mapping_required' : ''}`
     };
     
     // ========== PRECHECK ==========
@@ -5366,6 +5405,11 @@ function runMaymunAssetLayerWriteSelectedTransfer() {
       // Если событие создано (не дубликат), проверить нужна ли DECISION
       let decisionResult = { action: 'skipped', reason: 'not_required' };
       if (eventResult.action === 'appended' && eventStatus === 'manual_review') {
+        const decisionReason = isProjectMappingRequired ? 'project_mapping_required' : 'manual_review_required';
+        const decisionNotes = isProjectMappingRequired
+          ? `project_mapping_required: project_id=${event.project_id || '<empty>'}; map transfer to a RESIDENTS project before approval; ${event.notes}`
+          : event.notes;
+
         const decision = {
           event_id: eventResult.event_id,
           decision_type: 'manual_review',
@@ -5377,8 +5421,8 @@ function runMaymunAssetLayerWriteSelectedTransfer() {
           asset_code: event.asset_code,
           requires_owner_go: 'TRUE',
           owner_go_status: 'pending',
-          reason: 'Manual review required for selected transfer',
-          notes: event.notes
+          reason: decisionReason,
+          notes: decisionNotes
         };
         decisionResult = upsertMaymunDecision(decision, writeOpts);
       }

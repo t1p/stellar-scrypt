@@ -57,6 +57,12 @@
 4. Для цепочки после фиксации transfer выполните:
    - `MAYMUN: Create allocation from selected DECISION` (на выбранной строке листа `MAYMUN_DECISIONS`);
    - `MAYMUN: Create runway snapshot`.
+
+Правило блокера для selected TRANSFER:
+
+- Если `project_id` неразрешён (`UNMAPPED`, `UNKNOWN`, пусто и аналоги), событие записывается только как `event_status=manual_review` и `confidence=low`.
+- Для такого события обязательно создаётся `MAYMUN_DECISIONS` с `decision_status=pending_approval`, `owner_go_status=pending`, `reason=project_mapping_required`.
+- `IN + Dividend` не даёт auto-confirmed путь при неразрешённом `project_id`: сначала нужен ручной mapping на проект из `RESIDENTS`.
 5. Проверьте `DEBUG_LOG` по `run_id` текущего запуска.
 
 ## Precheck (обязательный)

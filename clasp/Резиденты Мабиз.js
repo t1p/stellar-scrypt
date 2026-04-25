@@ -4830,7 +4830,7 @@ function syncAccountsMeta() {
   }
 }
 
-// Manual operator scenario (v1.1, 2026-04-25T06:59:48Z): MAYMUN_DECISIONS -> MAYMUN_ALLOCATIONS
+// Manual operator scenario (v1.2, 2026-04-25T10:10:00Z): MAYMUN_DECISIONS -> MAYMUN_ALLOCATIONS
 function runMaymunAssetLayerCreateAllocationFromSelectedDecision() {
   const runId = newRunId_();
   const ui = SpreadsheetApp.getUi();
@@ -4909,7 +4909,49 @@ function runMaymunAssetLayerCreateAllocationFromSelectedDecision() {
     }
 
     const amount = Number(decision.amount || 0);
-    const allocationType = String(decision.decision_type || '').trim() === 'record_income' ? 'planned_inflow' : 'planned_outflow';
+
+    // v1.2 (2026-04-25T10:10:00Z): prefer linked event semantics over decision_type-only heuristic
+    // to avoid misclassifying unresolved dividend income as outflow.
+    const eventsSheet = ss.getSheetByName(SHEET_MAYMUN_EVENTS);
+    let linkedEventType = '';
+    let linkedDirection = '';
+    if (eventsSheet && eventsSheet.getLastRow() > 1) {
+      const eventsShape = getSheetByHeaderMap_(eventsSheet);
+      const eventIdIdx = eventsShape.headerMap['event_id'];
+      if (eventIdIdx !== undefined) {
+        const eventsData = eventsSheet.getRange(2, 1, eventsSheet.getLastRow() - 1, eventsSheet.getLastColumn()).getValues();
+        const targetEventId = String(decision.event_id || '').trim();
+        for (let i = 0; i < eventsData.length; i++) {
+          if (String(eventsData[i][eventIdIdx] || '').trim() === targetEventId) {
+            const typeIdx = eventsShape.headerMap['event_type'];
+            const dirIdx = eventsShape.headerMap['direction'];
+            linkedEventType = typeIdx !== undefined ? String(eventsData[i][typeIdx] || '').trim().toLowerCase() : '';
+            linkedDirection = dirIdx !== undefined ? String(eventsData[i][dirIdx] || '').trim().toLowerCase() : '';
+            break;
+          }
+        }
+      }
+    }
+
+    let allocationType = 'planned_outflow';
+    const decisionType = String(decision.decision_type || '').trim().toLowerCase();
+    if (linkedEventType === 'dividend_received' || linkedEventType === 'funding_received' || linkedDirection === 'in') {
+      allocationType = 'planned_inflow';
+    } else if (decisionType === 'record_income') {
+      allocationType = 'planned_inflow';
+    }
+
+    if (!String(decision.approved_by || '').trim() || !String(decision.approved_at || '').trim()) {
+      writeDebugLog({
+        run_id: runId,
+        module: 'maymun_asset_layer',
+        timestamp: stableNowIso_(),
+        stage: 'allocation_from_decision.approval_audit_missing',
+        fundKey: SHEET_MAYMUN_DECISIONS,
+        details: 'approved_by and/or approved_at is empty; allocation proceeds with warning'
+      });
+    }
+
     const before = getMaymunAssetLayerRowCounts();
 
     const upsert = upsertMaymunAllocation({
@@ -5415,13 +5457,19 @@ function runMaymunAssetLayerWriteSelectedTransfer() {
           decision_type: 'manual_review',
           decision_status: 'pending_approval',
           policy_version: 'mvp_selected_transfer_v1',
+          rule_version: 'mvp_selected_transfer_v1',
           project_id: event.project_id,
           resident_id: '',
           amount: event.amount,
+          gross_amount: event.amount,
           asset_code: event.asset_code,
+          success_fee_percent: '',
+          success_fee_amount: '',
           requires_owner_go: 'TRUE',
           owner_go_status: 'pending',
           reason: decisionReason,
+          reason_code: decisionReason,
+          comment: decisionNotes,
           notes: decisionNotes
         };
         decisionResult = upsertMaymunDecision(decision, writeOpts);

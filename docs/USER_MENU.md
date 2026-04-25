@@ -201,7 +201,9 @@
 32. **MAYMUN: Create allocation from selected DECISION** → [`runMaymunAssetLayerCreateAllocationFromSelectedDecision()`](clasp/Резиденты%20Мабиз.js)
 - Что делает: на активном листе `MAYMUN_DECISIONS` берёт выбранную строку, проверяет обязательные поля и создаёт/обновляет allocation в `MAYMUN_ALLOCATIONS` через `upsertMaymunAllocation()`.
 - Условия записи: `decision_status=approved` и `owner_go_status=approved`; иначе запись блокируется с `allocation_blocked_pending_approval`.
-- Маппинг MVP: `bucket=runway`, `allocation_status=confirmed`, `allocation_type=planned_inflow` только для `decision_type=record_income`, иначе `planned_outflow`.
+- Маппинг MVP: `bucket=runway`, `allocation_status=confirmed`.
+- `allocation_type`: приоритетно по связанному событию (`dividend_received`/`funding_received`/`direction=in` -> `planned_inflow`), иначе fallback `decision_type=record_income -> planned_inflow`, в остальных случаях `planned_outflow`.
+- Если `approved_by`/`approved_at` пустые, запись не блокируется, но в `DEBUG_LOG` пишется warning `allocation_from_decision.approval_audit_missing`.
 - Дедуп: ключ `decision_id + bucket + allocation_type` (повторный запуск не создаёт дубль).
 
 33. **MAYMUN: Create runway snapshot** → [`runMaymunAssetLayerCreateRunwaySnapshot()`](clasp/Резиденты%20Мабиз.js)

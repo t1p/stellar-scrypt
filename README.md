@@ -126,6 +126,8 @@ Rollback и пошаговый безопасный запуск описаны 
    - Для такого события создаётся `MAYMUN_DECISIONS` с `decision_status=pending_approval`, `owner_go_status=pending`, `reason=project_mapping_required` и явной пометкой о необходимости маппинга на проект из `RESIDENTS`.
    - Даже при `direction=IN` и `class=Dividend` confirmed/auto path блокируется, пока не выполнен project mapping.
 2. `MAYMUN_DECISIONS -> MAYMUN_ALLOCATIONS` через `MAYMUN: Create allocation from selected DECISION`.
+   - Для `allocation_type` используется семантика связанного события (`dividend_received`/`funding_received`/`direction=in` -> `planned_inflow`) с fallback по `decision_type`.
+   - Если поля approval-аудита (`approved_by`, `approved_at`) не заполнены, запись не блокируется, но фиксируется warning в `DEBUG_LOG`.
 3. `MAYMUN_EVENTS / MAYMUN_ALLOCATIONS / MAYMUN_EXPENSES -> MAYMUN_RUNWAY` через `MAYMUN: Create runway snapshot`.
 
 Оба новых шага выполняются только вручную из Apps Script UI, используют protected owner write context и не включают cron/live projection.

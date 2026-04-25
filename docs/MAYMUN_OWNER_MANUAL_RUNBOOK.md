@@ -42,7 +42,9 @@
 - `runMaymunAssetLayerCreateAllocationFromSelectedDecision()`:
   - пишет только при `decision_status=approved` и `owner_go_status=approved`;
   - использует `upsertMaymunAllocation()` с ключом `decision_id + bucket + allocation_type`;
-  - маппинг MVP: `bucket=runway`, `allocation_status=confirmed`, `allocation_type=planned_inflow` только для `record_income`, иначе `planned_outflow`.
+  - маппинг MVP: `bucket=runway`, `allocation_status=confirmed`;
+  - `allocation_type` определяется приоритетно по связанному `MAYMUN_EVENTS` (`dividend_received`/`funding_received`/`direction=in` -> `planned_inflow`), иначе fallback по `decision_type`;
+  - при пустых `approved_by`/`approved_at` пишется warning в `DEBUG_LOG` (`allocation_from_decision.approval_audit_missing`).
 - `runMaymunAssetLayerCreateRunwaySnapshot()`:
   - агрегирует только подтверждённые строки (`allocation_status=confirmed`, `expense_status in (paid, confirmed)`);
   - создаёт append-only запись в `MAYMUN_RUNWAY`;

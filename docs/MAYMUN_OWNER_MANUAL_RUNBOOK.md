@@ -52,7 +52,10 @@
   - `asset_code` scope берётся из выбранной allocation;
   - агрегирует только подтверждённые строки (`allocation_status=confirmed`, `expense_status in (paid, confirmed)`) в выбранном `asset_code`;
   - создаёт append-only запись в `MAYMUN_RUNWAY`;
-  - считает `net_confirmed_runway` и `forecast_runway`.
+  - считает `net_confirmed_runway` и `forecast_runway`;
+  - блокирует duplicate snapshot при совпадении `asset_code` + нормализованного `source_allocation_ids` (stage `runway_snapshot.duplicate_blocked`, append не выполняется);
+  - заполняет legacy alias fields: `snapshot_date` (из `snapshot_at`), `confirmed_liquidity=confirmed_balance`, `pending_liquidity=0`, `liquidatable_assets_value=confirmed_balance`, `status=manual_snapshot`, `comment=Manual runway snapshot for selected allocation asset scope`;
+  - `monthly_burn`, `runway_days`, `self_sufficiency_ratio` остаются пустыми (нет burn/model в MVP), `top_risk` = `manual_review_required` только при наличии ignored pending/manual_review rows, иначе пусто.
 
 ## Пошаговый запуск (Apps Script UI)
 

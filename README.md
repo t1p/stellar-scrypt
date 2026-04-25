@@ -131,6 +131,8 @@ Rollback и пошаговый безопасный запуск описаны 
 3. `MAYMUN_EVENTS / MAYMUN_ALLOCATIONS / MAYMUN_EXPENSES -> MAYMUN_RUNWAY` через `MAYMUN: Create runway snapshot`.
    - Запускать с активного листа `MAYMUN_ALLOCATIONS` и выбранной ровно одной data-row.
    - `asset_code` scope берётся из выбранной allocation-строки; расчёт агрегирует только этот asset.
+   - Duplicate blocker: повторный запуск блокируется, если уже есть `MAYMUN_RUNWAY`-строка с тем же `asset_code` и тем же нормализованным набором `source_allocation_ids` (stage: `runway_snapshot.duplicate_blocked`).
+   - При создании snapshot заполняются legacy alias fields: `snapshot_date` (из `snapshot_at`, `YYYY-MM-DD`), `confirmed_liquidity=confirmed_balance`, `pending_liquidity=0`, `liquidatable_assets_value=confirmed_balance`, `status=manual_snapshot`, `comment=Manual runway snapshot for selected allocation asset scope`; `monthly_burn`, `runway_days`, `self_sufficiency_ratio` оставляются пустыми.
 
 Оба новых шага выполняются только вручную из Apps Script UI, используют protected owner write context и не включают cron/live projection.
 

@@ -212,6 +212,8 @@
 - Блокирует запуск, если активный лист не `MAYMUN_ALLOCATIONS`, выбрана не одна data-row или выбранная allocation не `allocation_status=confirmed`.
 - Формулы MVP: `net_confirmed_runway = confirmed_balance - planned_outflow - confirmed_expenses`, `forecast_runway = confirmed_balance - planned_outflow`.
 - В расчёт включаются только `allocation_status=confirmed` и `expense_status in (paid, confirmed)` для выбранного `asset_code`.
+- Duplicate blocker: повторный запуск блокируется при совпадении `asset_code` + нормализованного набора `source_allocation_ids`; пишется `DEBUG_LOG` stage `runway_snapshot.duplicate_blocked` и оператор получает alert.
+- Legacy alias fields в новой строке заполняются автоматически: `snapshot_date`, `confirmed_liquidity`, `pending_liquidity=0`, `liquidatable_assets_value`, `status=manual_snapshot`, `comment`; поля burn/model (`monthly_burn`, `runway_days`, `self_sufficiency_ratio`) остаются пустыми в MVP.
 
 ## Рекомендуемый порядок запуска для новой таблицы
 

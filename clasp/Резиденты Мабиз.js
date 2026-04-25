@@ -5040,7 +5040,7 @@ function runMaymunAssetLayerCreateAllocationFromSelectedDecision() {
   }
 }
 
-// Manual operator scenario (v1.3, 2026-04-25T10:27:00Z): selected MAYMUN_ALLOCATIONS row scopes MAYMUN_RUNWAY snapshot asset.
+// Manual operator scenario (v1.4, 2026-04-25T10:40:00Z): selected MAYMUN_ALLOCATIONS row scopes MAYMUN_RUNWAY snapshot asset with duplicate blocker + legacy aliases.
 function runMaymunAssetLayerCreateRunwaySnapshot() {
   const runId = newRunId_();
   const ui = SpreadsheetApp.getUi();
@@ -5172,11 +5172,13 @@ function runMaymunAssetLayerCreateRunwaySnapshot() {
 
     const ambiguousAllocations = allocationRows.filter(function (row) {
       const st = String(row.allocation_status || '').trim().toLowerCase();
-      return st === 'pending' || st === 'manual_review' || st === 'proposed' || st === 'pending_approval' || st === 'ambiguous';
+      const assetCode = String(row.asset_code || '').trim();
+      return assetCode === selectedAssetCode && (st === 'pending' || st === 'manual_review' || st === 'proposed' || st === 'pending_approval' || st === 'ambiguous');
     }).length;
     const ambiguousExpenses = expenseRows.filter(function (row) {
       const st = String(row.expense_status || '').trim().toLowerCase();
-      return st === 'pending' || st === 'manual_review' || st === 'proposed' || st === 'pending_approval' || st === 'ambiguous';
+      const assetCode = String(row.asset_code || '').trim();
+      return assetCode === selectedAssetCode && (st === 'pending' || st === 'manual_review' || st === 'proposed' || st === 'pending_approval' || st === 'ambiguous');
     }).length;
     if (ambiguousAllocations + ambiguousExpenses > 0) {
       writeDebugLog({ run_id: runId, module: 'maymun_asset_layer', timestamp: stableNowIso_(), stage: 'runway_snapshot.unconfirmed_rows_ignored', fundKey: 'WARN', details: `ignored allocations=${ambiguousAllocations}, expenses=${ambiguousExpenses}` });
@@ -5212,8 +5214,38 @@ function runMaymunAssetLayerCreateRunwaySnapshot() {
     const netConfirmedRunway = confirmedBalance - plannedOutflow - confirmedExpenses;
     const forecastRunway = confirmedBalance - plannedOutflow;
     const now = stableNowIso_();
+    const sourceAllocationIdsNormalized = sourceAllocationIds
+      .map(function (id) { return String(id || '').trim(); })
+      .filter(function (id) { return id !== ''; })
+      .sort()
+      .join(',');
+
+    const existingRunwayRows = readSheetRowsAsObjects_(runwaySheet);
+    const duplicateRow = existingRunwayRows.find(function (row) {
+      const rowAssetCode = String(row.asset_code || '').trim();
+      const rowSourceAllocationIdsNormalized = String(row.source_allocation_ids || '')
+        .split(',')
+        .map(function (id) { return String(id || '').trim(); })
+        .filter(function (id) { return id !== ''; })
+        .sort()
+        .join(',');
+      return rowAssetCode === selectedAssetCode && rowSourceAllocationIdsNormalized === sourceAllocationIdsNormalized;
+    });
+
+    if (duplicateRow) {
+      const duplicateSnapshotId = String(duplicateRow.snapshot_id || '').trim() || '<unknown_snapshot_id>';
+      const msg = `Runway snapshot is blocked: duplicate source_allocation_ids set already exists for asset ${selectedAssetCode} (snapshot_id=${duplicateSnapshotId}).`;
+      writeDebugLog({ run_id: runId, module: 'maymun_asset_layer', timestamp: stableNowIso_(), stage: 'runway_snapshot.duplicate_blocked', fundKey: SHEET_MAYMUN_RUNWAY, details: msg });
+      result.asset_code = selectedAssetCode;
+      result.action = 'blocked';
+      result.debug_log_stages.push('runway_snapshot.duplicate_blocked');
+      ui.alert(msg);
+      Logger.log(result);
+      return result;
+    }
 
     const before = getMaymunAssetLayerRowCounts();
+    const topRiskValue = (ambiguousAllocations + ambiguousExpenses > 0) ? 'manual_review_required' : '';
     const appended = appendMaymunRunwaySnapshot({
       snapshot_id: `runway_${sanitizeForId_(now)}_${sanitizeForId_(selectedAssetCode)}`,
       snapshot_at: now,
@@ -5232,7 +5264,16 @@ function runMaymunAssetLayerCreateRunwaySnapshot() {
       source_expense_ids: sourceExpenseIds.join(','),
       calculation_version: 'mvp_manual_runway_v1',
       created_by: 'runway_manual_operator',
-      notes: 'Manual runway snapshot from confirmed MAYMUN_* rows'
+      notes: 'Manual runway snapshot from confirmed MAYMUN_* rows',
+      snapshot_date: now.slice(0, 10),
+      confirmed_liquidity: confirmedBalance,
+      pending_liquidity: 0,
+      liquidatable_assets_value: confirmedBalance,
+      monthly_burn: '',
+      self_sufficiency_ratio: '',
+      status: 'manual_snapshot',
+      top_risk: topRiskValue,
+      comment: 'Manual runway snapshot for selected allocation asset scope'
     }, {
       runId: runId,
       actor: 'runway_manual_operator',

@@ -119,6 +119,67 @@ Owner-approved write profile делает:
 
 Rollback и пошаговый безопасный запуск описаны в [`docs/MAYMUN_OWNER_MANUAL_RUNBOOK.md`](docs/MAYMUN_OWNER_MANUAL_RUNBOOK.md).
 
+### ASSET-MVP-005 — Очередь кандидатов precheck с ручным approve
+
+Добавлен служебный лист `MAYMUN_PRECHECK_CANDIDATES` для ручной очереди кандидатов до бизнес-записи в `MAYMUN_EVENTS`/`MAYMUN_DECISIONS`.
+
+Доступны два ручных пункта меню:
+
+- `MAYMUN: Precheck unprocessed TRANSFERS` (`runMaymunAssetLayerPrecheckUnprocessedTransfers()`).
+- `MAYMUN: Process approved PRECHECK candidates` (`runMaymunAssetLayerProcessApprovedPrecheckCandidates()`).
+
+Что делает precheck:
+
+- сканирует необработанные `TRANSFERS` (по дедуп-ключу `transfer_key = tx_hash + ':' + op_id`);
+- делает upsert строк в `MAYMUN_PRECHECK_CANDIDATES` (без дублей);
+- сохраняет текущий `approval_status`, если он уже `approved` / `rejected` / `hold`;
+- пишет служебные записи в `MAYMUN_RUNS` и `DEBUG_LOG` (`precheck_candidates_scan`, `precheck_candidate_upsert`).
+
+Что делает обработка approved-кандидатов:
+
+- берёт только `approval_status=approved` и `processing_status=new`;
+- обрабатывает максимум 10 строк за запуск;
+- создаёт `MAYMUN_EVENT` по тем же правилам, что и `runMaymunAssetLayerWriteSelectedTransfer()`;
+- при `manual_review` создаёт `MAYMUN_DECISION`;
+- пишет результат в строку кандидата: `processing_status`, `processed_at`, `result_event_id`, `result_decision_id`, `error`.
+
+Важно: precheck-этап не пишет в бизнес-листы `MAYMUN_EVENTS`, `MAYMUN_DECISIONS`, `MAYMUN_ALLOCATIONS`, `MAYMUN_EXPENSES`, `MAYMUN_RUNWAY`.
+
+### Ручной сценарий после фиксации TRANSFER
+
+1. `TRANSFERS -> MAYMUN_EVENTS` через ручной operator flow.
+   - Если `project_id` неразрешён (`UNMAPPED`, `UNKNOWN`, пусто и аналоги), событие принудительно получает `event_status=manual_review` и `confidence=low`.
+   - Для такого события создаётся `MAYMUN_DECISIONS` с `decision_status=pending_approval`, `owner_go_status=pending`, `reason=project_mapping_required` и явной пометкой о необходимости маппинга на проект из `RESIDENTS`.
+   - Даже при `direction=IN` и `class=Dividend` confirmed/auto path блокируется, пока не выполнен project mapping.
+
+**Два пути создания allocation:**
+
+**Путь A: Через DECISION (для manual_review событий)**
+2a. `MAYMUN_DECISIONS -> MAYMUN_ALLOCATIONS` через `MAYMUN: Create allocation from selected DECISION`.
+   - Для `allocation_type` используется семантика связанного события (`dividend_received`/`funding_received`/`direction=in` -> `planned_inflow`) с fallback по `decision_type`.
+   - Если поля approval-аудита (`approved_by`, `approved_at`) не заполнены, запись не блокируется, но фиксируется warning в `DEBUG_LOG`.
+
+**Путь B: Прямо из confirmed EVENT (для подтвержденных событий)**
+2b. `MAYMUN_EVENTS -> MAYMUN_ALLOCATIONS` через `MAYMUN: Create allocation from selected EVENT` (v1.0, 2026-04-25).
+   - Работает только для событий с `event_status=confirmed` (например, `IN + Dividend` с resolved `project_id`).
+   - Блокирует, если `event_status != confirmed` — для `manual_review` используйте путь A через DECISION.
+   - Блокирует, если `project_id` неразрешён (`UNMAPPED`, `AMBIGUOUS`, `UNKNOWN`, пусто) — используйте resolved `project_id`.
+   - Определяет `allocation_type` по `event_type` и `direction`: `dividend_received`/`funding_received`/`direction=in` → `planned_inflow`, иначе → `planned_outflow`.
+   - Проверяет conflicting allocation type по `event_id + bucket` (аналогично decision-пути).
+   - Создаёт allocation с `allocation_status=confirmed` и synthetic `decision_id` вида `dec_<event_id>_confirmed_event_mvp_v1` (строка в `MAYMUN_DECISIONS` при этом не создаётся).
+   - Заполняет `created_by=selected_event_manual_operator`, `notes` с явной пометкой, что запись создана напрямую из confirmed event без decision row.
+
+3. `MAYMUN_EVENTS / MAYMUN_ALLOCATIONS / MAYMUN_EXPENSES -> MAYMUN_RUNWAY` через `MAYMUN: Create runway snapshot`.
+   - Запускать с активного листа `MAYMUN_ALLOCATIONS` и выбранной ровно одной data-row.
+   - `asset_code` scope берётся из выбранной allocation-строки; расчёт агрегирует только этот asset.
+   - Duplicate blocker: повторный запуск блокируется, если уже есть `MAYMUN_RUNWAY`-строка с тем же `asset_code` и тем же нормализованным набором `source_allocation_ids` (stage: `runway_snapshot.duplicate_blocked`).
+   - При создании snapshot заполняются legacy alias fields: `snapshot_date` (из `snapshot_at`, `YYYY-MM-DD`), `confirmed_liquidity=confirmed_balance`, `pending_liquidity=0`, `liquidatable_assets_value=confirmed_balance`, `status=manual_snapshot`, `comment=Manual runway snapshot for selected allocation asset scope`; `monthly_burn`, `runway_days`, `self_sufficiency_ratio` оставляются пустыми.
+
+Оба новых шага выполняются только вручную из Apps Script UI, используют protected owner write context и не включают cron/live projection.
+
+Дополнительно для allocation safety:
+- при конфликте типов для одного `decision_id + bucket` (`planned_inflow` vs `planned_outflow`) новая запись блокируется до ручного разрешения, чтобы не допускать двойной активной аллокации по одному decision.
+
 ## Безопасность
 
 * **ClickUp токен**: Храните `CLICKUP_API_KEY` только в листе CONST. Не коммитите в репозиторий.

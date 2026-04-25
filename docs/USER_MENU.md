@@ -198,6 +198,46 @@
 - Postcheck: row deltas, `DEBUG_LOG` rows, список add/update, repeat/dedup check по `tx_hash + op_id`.
 - Ограничения: только Apps Script UI/manual operator; не для cron, не для unattended CLI (`clasp run`), merge status остаётся hold.
 
+32. **MAYMUN: Create allocation from selected DECISION** → [`runMaymunAssetLayerCreateAllocationFromSelectedDecision()`](clasp/Резиденты%20Мабиз.js)
+- Что делает: на активном листе `MAYMUN_DECISIONS` берёт выбранную строку, проверяет обязательные поля и создаёт/обновляет allocation в `MAYMUN_ALLOCATIONS` через `upsertMaymunAllocation()`.
+- Условия записи: `decision_status=approved` и `owner_go_status=approved`; иначе запись блокируется с `allocation_blocked_pending_approval`.
+- Маппинг MVP: `bucket=runway`, `allocation_status=confirmed`.
+- `allocation_type`: приоритетно по связанному событию (`dividend_received`/`funding_received`/`direction=in` -> `planned_inflow`), иначе fallback `decision_type=record_income -> planned_inflow`, в остальных случаях `planned_outflow`.
+- Если `approved_by`/`approved_at` пустые, запись не блокируется, но в `DEBUG_LOG` пишется warning `allocation_from_decision.approval_audit_missing`.
+- Дедуп: ключ `decision_id + bucket + allocation_type` (повторный запуск не создаёт дубль).
+- Защита от противоположного типа: если для того же `decision_id + bucket` уже существует allocation с другим `allocation_type`, новая запись блокируется (`allocation_blocked_conflicting_allocation_type`) до ручного разрешения конфликта.
+
+33. **MAYMUN: Create allocation from selected EVENT** → [`runMaymunAssetLayerCreateAllocationFromSelectedEvent()`](clasp/Резиденты%20Мабиз.js) (v1.0, 2026-04-25)
+- Что делает: на активном листе `MAYMUN_EVENTS` берёт выбранную строку, проверяет обязательные поля и создаёт allocation в `MAYMUN_ALLOCATIONS` прямо из confirmed события (без промежуточного decision).
+- Условия записи: `event_status=confirmed` и `project_id` разрешён (не `UNMAPPED`, `AMBIGUOUS`, `UNKNOWN`, пусто); иначе запись блокируется.
+- Маппинг: `bucket=runway`, `allocation_status=confirmed`, synthetic `decision_id` вида `dec_<event_id>_confirmed_event_mvp_v1` (без создания строки в `MAYMUN_DECISIONS`).
+- `allocation_type`: по `event_type` и `direction`: `dividend_received`/`funding_received`/`direction=in` → `planned_inflow`, иначе → `planned_outflow`.
+- Дедуп: ключ `event_id + bucket + allocation_type` (повторный запуск не создаёт дубль).
+- Защита от противоположного типа: если для того же `event_id + bucket` уже существует allocation с другим `allocation_type`, новая запись блокируется до ручного разрешения конфликта.
+- Заполняет `created_by=selected_event_manual_operator`, `notes` с явной пометкой: allocation создана напрямую из confirmed event без decision row.
+
+34. **MAYMUN: Create runway snapshot** → [`runMaymunAssetLayerCreateRunwaySnapshot()`](clasp/Резиденты%20Мабиз.js)
+- Что делает: на активном листе `MAYMUN_ALLOCATIONS` требует выбранную ровно одну data-row, берёт из неё `asset_code` и формирует append-only snapshot в `MAYMUN_RUNWAY` только в этом asset scope.
+- Блокирует запуск, если активный лист не `MAYMUN_ALLOCATIONS`, выбрана не одна data-row или выбранная allocation не `allocation_status=confirmed`.
+- Формулы MVP: `net_confirmed_runway = confirmed_balance - planned_outflow - confirmed_expenses`, `forecast_runway = confirmed_balance - planned_outflow`.
+- В расчёт включаются только `allocation_status=confirmed` и `expense_status in (paid, confirmed)` для выбранного `asset_code`.
+- Duplicate blocker: повторный запуск блокируется при совпадении `asset_code` + нормализованного набора `source_allocation_ids`; пишется `DEBUG_LOG` stage `runway_snapshot.duplicate_blocked` и оператор получает alert.
+- Legacy alias fields в новой строке заполняются автоматически: `snapshot_date`, `confirmed_liquidity`, `pending_liquidity=0`, `liquidatable_assets_value`, `status=manual_snapshot`, `comment`; поля burn/model (`monthly_burn`, `runway_days`, `self_sufficiency_ratio`) остаются пустыми в MVP.
+
+35. **MAYMUN: Precheck unprocessed TRANSFERS** → [`runMaymunAssetLayerPrecheckUnprocessedTransfers()`](clasp/Резиденты%20Мабиз.js) (v1.1, 2026-04-25)
+- Что делает: сканирует необработанные `TRANSFERS` и делает post-row upsert в `MAYMUN_PRECHECK_CANDIDATES` по `transfer_key = tx_hash + ':' + op_id`.
+- Что пишет: `MAYMUN_PRECHECK_CANDIDATES`, `MAYMUN_RUNS`, `DEBUG_LOG` (stage: `precheck_candidates_scan`, `precheck_candidate_upsert`).
+- Dedup: дубли в очереди не создаются; при повторном precheck обновляются только precheck-поля, `approval_status` сохраняется, если уже `approved`/`rejected`/`hold`.
+- Что не делает: не пишет в `MAYMUN_EVENTS`, `MAYMUN_DECISIONS`, `MAYMUN_ALLOCATIONS`, `MAYMUN_EXPENSES`, `MAYMUN_RUNWAY`.
+- Ограничения: только ручной запуск из UI, без cron/triggers/live projection, без `clasp run`, без изменения runtime/credentials/providers.
+
+36. **MAYMUN: Process approved PRECHECK candidates** → [`runMaymunAssetLayerProcessApprovedPrecheckCandidates()`](clasp/Резиденты%20Мабиз.js) (v1.0, 2026-04-25)
+- Что делает: обрабатывает только строки `MAYMUN_PRECHECK_CANDIDATES` с `approval_status=approved` и `processing_status=new`.
+- Batch limit: максимум 10 кандидатов за запуск; если строк больше — обрабатываются первые 10 и пишется warning в `DEBUG_LOG`.
+- Для каждой строки: создаёт `MAYMUN_EVENT` по тем же правилам, что selected-transfer flow; для `manual_review` создаёт `MAYMUN_DECISION`.
+- Обратная запись в очередь: `processing_status`, `processed_at`, `result_event_id`, `result_decision_id`, `error`.
+- DEBUG stages: `process_approved_candidates_start`, `process_candidate`, `process_candidate_duplicate`, `process_candidate_failed`, `process_approved_candidates_complete`.
+
 ## Рекомендуемый порядок запуска для новой таблицы
 
 1. Подготовить `CONST` (ключи Stellar/ClickUp) по требованиям из [`README.md`](README.md:23).
@@ -211,7 +251,11 @@
 9. После [`syncResidentTracking()`](clasp/Резиденты%20Мабиз.js) собрать RT-витрины: [`buildResidentTimeline()`](clasp/Резиденты%20Мабиз.js:1630), [`buildTokenFlows()`](clasp/Резиденты%20Мабиз.js:1750), [`buildIssuerStructure()`](clasp/Резиденты%20Мабиз.js:1865).
 10. Account metadata: при необходимости запускать [`updateAccountCreationDetails()`](clasp/Резиденты%20Мабиз.js) и [`syncAccountsMeta()`](clasp/Резиденты%20Мабиз.js).
 11. Сборка отчётов: **Собрать FACT_MONTHLY** → [`buildFactMonthly()`](clasp/Резиденты%20Мабиз.js:2276), **Собрать KPI_RAW** → [`buildKpiRaw()`](clasp/Резиденты%20Мабиз.js:2406).
-12. Контроль результата по листу `DEBUG_LOG` через [`writeDebugLog()`](clasp/Резиденты%20Мабиз.js:1307).
+12. MAYMUN manual chain после фиксации transfer:
+   - `TRANSFERS -> MAYMUN_EVENTS` (если `project_id=UNMAPPED/UNKNOWN/пусто/неразрешён`, то только `manual_review` + обязательный decision `pending_approval` с причиной `project_mapping_required`);
+   - `MAYMUN_DECISIONS -> MAYMUN_ALLOCATIONS`;
+   - `MAYMUN_* -> MAYMUN_RUNWAY`.
+13. Контроль результата по листу `DEBUG_LOG` через [`writeDebugLog()`](clasp/Резиденты%20Мабиз.js:1307).
 
 ## Безопасность и данные
 

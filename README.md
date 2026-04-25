@@ -132,6 +132,9 @@ Rollback и пошаговый безопасный запуск описаны 
 
 Оба новых шага выполняются только вручную из Apps Script UI, используют protected owner write context и не включают cron/live projection.
 
+Дополнительно для allocation safety:
+- при конфликте типов для одного `decision_id + bucket` (`planned_inflow` vs `planned_outflow`) новая запись блокируется до ручного разрешения, чтобы не допускать двойной активной аллокации по одному decision.
+
 ## Безопасность
 
 * **ClickUp токен**: Храните `CLICKUP_API_KEY` только в листе CONST. Не коммитите в репозиторий.

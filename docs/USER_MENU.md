@@ -205,6 +205,7 @@
 - `allocation_type`: приоритетно по связанному событию (`dividend_received`/`funding_received`/`direction=in` -> `planned_inflow`), иначе fallback `decision_type=record_income -> planned_inflow`, в остальных случаях `planned_outflow`.
 - Если `approved_by`/`approved_at` пустые, запись не блокируется, но в `DEBUG_LOG` пишется warning `allocation_from_decision.approval_audit_missing`.
 - Дедуп: ключ `decision_id + bucket + allocation_type` (повторный запуск не создаёт дубль).
+- Защита от противоположного типа: если для того же `decision_id + bucket` уже существует allocation с другим `allocation_type`, новая запись блокируется (`allocation_blocked_conflicting_allocation_type`) до ручного разрешения конфликта.
 
 33. **MAYMUN: Create runway snapshot** → [`runMaymunAssetLayerCreateRunwaySnapshot()`](clasp/Резиденты%20Мабиз.js)
 - Что делает: агрегирует подтверждённые данные из `MAYMUN_ALLOCATIONS` и `MAYMUN_EXPENSES`, формирует append-only snapshot в `MAYMUN_RUNWAY`.

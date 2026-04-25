@@ -4910,8 +4910,8 @@ function runMaymunAssetLayerCreateAllocationFromSelectedDecision() {
 
     const amount = Number(decision.amount || 0);
 
-    // v1.2 (2026-04-25T10:10:00Z): prefer linked event semantics over decision_type-only heuristic
-    // to avoid misclassifying unresolved dividend income as outflow.
+    // v1.3 (2026-04-25T10:18:30Z): prefer linked event semantics over decision_type-only heuristic
+    // and block conflicting opposite allocation_type for same decision+bucket.
     const eventsSheet = ss.getSheetByName(SHEET_MAYMUN_EVENTS);
     let linkedEventType = '';
     let linkedDirection = '';
@@ -4950,6 +4950,46 @@ function runMaymunAssetLayerCreateAllocationFromSelectedDecision() {
         fundKey: SHEET_MAYMUN_DECISIONS,
         details: 'approved_by and/or approved_at is empty; allocation proceeds with warning'
       });
+    }
+
+    // Block creating opposite allocation_type for the same decision+bucket.
+    // This prevents dual active inflow/outflow rows for a single decision.
+    const allocationsSheet = ss.getSheetByName(SHEET_MAYMUN_ALLOCATIONS);
+    if (allocationsSheet && allocationsSheet.getLastRow() > 1) {
+      const allocShape = getSheetByHeaderMap_(allocationsSheet);
+      const decisionIdx = allocShape.headerMap['decision_id'];
+      const bucketIdx = allocShape.headerMap['bucket'];
+      const typeIdx = allocShape.headerMap['allocation_type'];
+      const allocIdIdx = allocShape.headerMap['allocation_id'];
+      if (decisionIdx !== undefined && bucketIdx !== undefined && typeIdx !== undefined) {
+        const allocData = allocationsSheet.getRange(2, 1, allocationsSheet.getLastRow() - 1, allocationsSheet.getLastColumn()).getValues();
+        const targetDecisionId = String(decision.decision_id || '').trim();
+        const targetBucket = 'runway';
+        const conflictingIds = [];
+        for (let i = 0; i < allocData.length; i++) {
+          const d = String(allocData[i][decisionIdx] || '').trim();
+          const b = String(allocData[i][bucketIdx] || '').trim();
+          const t = String(allocData[i][typeIdx] || '').trim();
+          if (d === targetDecisionId && b === targetBucket && t && t !== allocationType) {
+            conflictingIds.push(allocIdIdx !== undefined ? String(allocData[i][allocIdIdx] || '').trim() : `row_${i + 2}`);
+          }
+        }
+        if (conflictingIds.length) {
+          const msg = 'Allocation blocked: conflicting allocation_type exists for the same decision/bucket. Resolve old row first.';
+          writeDebugLog({
+            run_id: runId,
+            module: 'maymun_asset_layer',
+            timestamp: stableNowIso_(),
+            stage: 'allocation_blocked_conflicting_allocation_type',
+            fundKey: SHEET_MAYMUN_ALLOCATIONS,
+            details: `${msg} decision_id=${targetDecisionId}, expected_type=${allocationType}, conflicting_ids=${conflictingIds.join(',')}`
+          });
+          ui.alert('Allocation blocked: conflicting allocation type already exists for this decision. Resolve previous allocation row first.');
+          result.debug_log_stages.push('allocation_blocked_conflicting_allocation_type');
+          Logger.log(result);
+          return result;
+        }
+      }
     }
 
     const before = getMaymunAssetLayerRowCounts();

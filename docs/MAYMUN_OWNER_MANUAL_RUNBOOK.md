@@ -45,6 +45,7 @@
   - маппинг MVP: `bucket=runway`, `allocation_status=confirmed`;
   - `allocation_type` определяется приоритетно по связанному `MAYMUN_EVENTS` (`dividend_received`/`funding_received`/`direction=in` -> `planned_inflow`), иначе fallback по `decision_type`;
   - при пустых `approved_by`/`approved_at` пишется warning в `DEBUG_LOG` (`allocation_from_decision.approval_audit_missing`).
+  - если для того же `decision_id + bucket` уже есть allocation с противоположным `allocation_type`, запись блокируется (`allocation_blocked_conflicting_allocation_type`) до ручного разрешения.
 - `runMaymunAssetLayerCreateRunwaySnapshot()`:
   - агрегирует только подтверждённые строки (`allocation_status=confirmed`, `expense_status in (paid, confirmed)`);
   - создаёт append-only запись в `MAYMUN_RUNWAY`;

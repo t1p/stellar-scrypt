@@ -33,19 +33,21 @@ describe('mapProjectIdForTransfer_', () => {
     }
   };
 
+  // Shape must match buildProjectMapIndex_() in clasp/Резиденты Мабиз.js.
+  const projectMapIndex = {
+    tokenToProjectIds: { TOC: ['M45171'], TIC: ['M13118'] },
+    assetCodeToProjectIds: { TOC: ['M45171'], TIC: ['M13118'] },
+    projectById: {
+      M45171: { token_symbol: 'TOC' },
+      M13118: { token_symbol: 'TIC' }
+    }
+  };
   const mabizIndexes = {
     residentsIndex: {
       accountToProjectIds: { SHARED_ACCOUNT: ['M45171', 'M13118'] },
       issuerToProjectIds: { SHARED_ISSUER: ['M45171', 'M13118'] }
     },
-    projectMapIndex: {
-      tokenToProjectIds: { TOC: ['M45171'], TIC: ['M13118'] },
-      assetCodeToProjectIds: { TOC: ['M45171'], TIC: ['M13118'] },
-      projectById: {
-        M45171: { token_symbol: 'TOC' },
-        M13118: { token_symbol: 'TIC' }
-      }
-    }
+    projectMapIndex
   };
 
   describe('Account-based mapping', () => {

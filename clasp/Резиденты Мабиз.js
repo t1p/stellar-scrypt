@@ -536,7 +536,7 @@ function syncStellarTransfers() {
       const tags = fundKey === 'MABIZ_DEFAULT' ? 'D' : '';
 
       // Маппинг project_id
-      const mappingResult = mapProjectIdForTransfer_({ from, to, asset_issuer: assetIssuer, memo: memoText }, indexes);
+      const mappingResult = mapProjectIdForTransfer_({ from, to, asset_issuer: assetIssuer, asset_code: assetCode, memo: memoText }, indexes);
       const projectId = mappingResult.project_id;
       
       if (projectId === 'UNMAPPED') log.unmapped_count++;
@@ -586,7 +586,8 @@ function syncStellarTransfers() {
         projectId,
         transferClass,
         '', // class_override
-        tags
+        tags,
+        mappingResult.mapping_method
       ];
       rows.push(row);
     }
@@ -1288,6 +1289,8 @@ function parseAccountsSheet(sheet) {
 function parseProjectMapSheet(sheet) {
   if (!sheet) return {};
   const rows = sheet.getDataRange().getValues();
+  const headers = rows[0] || [];
+  const memoPatternsIdx = headers.findIndex(header => ['memo_patterns', 'memo_pattern', 'memo_templates', 'memo_template'].includes(normalizeHeaderKey_(header)));
   const map = {};
   for (let i = 1; i < rows.length; i++) { // Пропускаем заголовок
     const [projectId, clickupTaskId, stellarAccount, stellarIssuer, tokenSymbol, isActive] = rows[i];
@@ -1296,7 +1299,10 @@ function parseProjectMapSheet(sheet) {
         clickup_task_id: clickupTaskId ? String(clickupTaskId).trim() : null,
         stellar_account: stellarAccount ? String(stellarAccount).trim() : null,
         stellar_issuer: stellarIssuer ? String(stellarIssuer).trim() : null,
-        token_symbol: tokenSymbol ? String(tokenSymbol).trim() : null
+        token_symbol: tokenSymbol ? String(tokenSymbol).trim() : null,
+        memo_patterns: memoPatternsIdx >= 0 && rows[i][memoPatternsIdx]
+          ? String(rows[i][memoPatternsIdx]).split('|').map(pattern => pattern.trim()).filter(Boolean)
+          : []
       };
     }
   }
@@ -1310,11 +1316,16 @@ function buildProjectMapIndex_() {
   const index = {
     stellarAccountToProjectIds: {},
     stellarIssuerToProjectIds: {},
-    tokenToProjectIds: {}
+    tokenToProjectIds: {},
+    assetCodeToProjectIds: {},
+    projectById: {},
+    projectMemoPatterns: {}
   };
 
   for (const projectId in projectMap) {
     const mapping = projectMap[projectId];
+    index.projectById[projectId] = mapping;
+    if (mapping.memo_patterns && mapping.memo_patterns.length) index.projectMemoPatterns[projectId] = mapping.memo_patterns;
     if (mapping.stellar_account) {
       const acc = mapping.stellar_account;
       if (!index.stellarAccountToProjectIds[acc]) index.stellarAccountToProjectIds[acc] = [];
@@ -1335,6 +1346,9 @@ function buildProjectMapIndex_() {
       if (!index.tokenToProjectIds[tok].includes(projectId)) {
         index.tokenToProjectIds[tok].push(projectId);
       }
+      const normalizedToken = String(mapping.token_symbol).trim().toUpperCase();
+      if (!index.assetCodeToProjectIds[normalizedToken]) index.assetCodeToProjectIds[normalizedToken] = [];
+      if (!index.assetCodeToProjectIds[normalizedToken].includes(projectId)) index.assetCodeToProjectIds[normalizedToken].push(projectId);
     }
   }
 
@@ -1405,7 +1419,7 @@ function buildResidentsIndex_() {
 function mapProjectIdForTransfer_(transfer, indexes) {
   const core = getDomainCore_();
   if (typeof core.mapProjectIdForTransfer === 'function') {
-    const regex = PROJECT_ID_REGEX || /\bP?\d{3,6}\b/;
+    const regex = PROJECT_ID_REGEX || /(?:^|[^\p{L}\p{N}])([PMМ]?\d{3,6})(?=$|[^\p{L}\p{N}])/giu;
     return core.mapProjectIdForTransfer(transfer, indexes, {
       projectIdRegex: regex,
       isProjectIdKnown: function (projectId) {
@@ -1416,8 +1430,59 @@ function mapProjectIdForTransfer_(transfer, indexes) {
     });
   }
 
-  const { from, to, asset_issuer, memo } = transfer;
+  const { from, to, asset_issuer, asset_code, memo } = transfer;
   const { accountToProjectIds, issuerToProjectIds } = indexes.residentsIndex;
+  const projectMapIndex = indexes.projectMapIndex || {};
+  const projectIdsByToken = projectMapIndex.tokenToProjectIds || {};
+  const projectIdsByAssetCode = projectMapIndex.assetCodeToProjectIds || projectIdsByToken;
+  const projectById = projectMapIndex.projectById || {};
+  const unique = values => [...new Set((values || []).filter(Boolean).map(String))];
+  const lookup = (map, key) => {
+    const target = String(key || '').trim().toUpperCase();
+    if (!target) return [];
+    return unique(Object.keys(map || {}).filter(k => String(k).trim().toUpperCase() === target).flatMap(k => Array.isArray(map[k]) ? map[k] : []));
+  };
+  const escapeRegExp = value => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const hasToken = (text, token) => {
+    const source = String(text || '').normalize('NFKC');
+    const target = String(token || '').normalize('NFKC').trim();
+    return source && target && new RegExp(`(^|[^\\p{L}\\p{N}])${escapeRegExp(target)}(?=$|[^\\p{L}\\p{N}])`, 'iu').test(source);
+  };
+  const memoProjectCandidates = text => {
+    const ids = Object.keys(projectById).filter(projectId => hasToken(text, projectId));
+    const regex = PROJECT_ID_REGEX || /(?:^|[^\p{L}\p{N}])([PMМ]?\d{3,6})(?=$|[^\p{L}\p{N}])/giu;
+    const scan = new RegExp(regex.source, regex.flags.indexOf('g') >= 0 ? regex.flags : regex.flags + 'g');
+    let match;
+    while ((match = scan.exec(String(text || ''))) !== null) {
+      const raw = (match[1] || match[0]).trim().replace(/^P/i, '');
+      if (projectById[raw] || projectById[raw.replace(/[\u041c]/g, 'M')] || projectById[raw.replace(/^M/, 'М')]) ids.push(projectById[raw] ? raw : (projectById[raw.replace(/[\u041c]/g, 'M')] ? raw.replace(/[\u041c]/g, 'M') : raw.replace(/^M/, 'М')));
+      if (match[0] === '') scan.lastIndex++;
+    }
+    return unique(ids);
+  };
+  const memoTokenCandidates = text => unique(Object.keys(projectIdsByToken).flatMap(token => hasToken(text, token) ? lookup(projectIdsByToken, token) : []));
+  const configuredMemoCandidates = text => {
+    const patterns = projectMapIndex.projectMemoPatterns || {};
+    return unique(Object.keys(patterns).filter(projectId => (Array.isArray(patterns[projectId]) ? patterns[projectId] : [patterns[projectId]]).some(pattern => hasToken(text, pattern))));
+  };
+  const narrowingEvidence = () => [
+    { ids: memoProjectCandidates(memo), method: 'MEMO_PROJECT_ID' },
+    { ids: memoTokenCandidates(memo), method: 'MEMO_TOKEN' },
+    { ids: lookup(projectIdsByAssetCode, asset_code), method: 'ASSET_CODE' },
+    { ids: configuredMemoCandidates(memo), method: 'PROJECT_MEMO_PATTERN' }
+  ].filter(item => item.ids.length > 0);
+  const resolveAmbiguous = candidates => {
+    const evidence = narrowingEvidence();
+    let narrowed = unique(candidates);
+    let method = null;
+    for (const item of evidence) {
+      const overlap = narrowed.filter(projectId => item.ids.includes(projectId));
+      if (!overlap.length) return null;
+      narrowed = overlap;
+      if (!method) method = item.method;
+    }
+    return narrowed.length === 1 ? { project_id: narrowed[0], mapping_method: method, candidates: narrowed, anomaly: null } : null;
+  };
   
   let candidates = [];
   let anomaly = null;
@@ -1430,6 +1495,8 @@ function mapProjectIdForTransfer_(transfer, indexes) {
     if (accountCandidates.length === 1) {
       return { project_id: accountCandidates[0], mapping_method: 'RESIDENTS_ACCOUNT', candidates: accountCandidates, anomaly: null };
     } else {
+      const narrowed = resolveAmbiguous(accountCandidates);
+      if (narrowed) return narrowed;
       anomaly = {
         reason: 'AMBIGUOUS',
         matched_accounts: [from, to].filter(a => accountToProjectIds[a] && accountToProjectIds[a].length > 0),
@@ -1447,6 +1514,8 @@ function mapProjectIdForTransfer_(transfer, indexes) {
     if (issuerCandidates.length === 1) {
       return { project_id: issuerCandidates[0], mapping_method: 'RESIDENTS_ISSUER', candidates: issuerCandidates, anomaly: null };
     } else {
+      const narrowed = resolveAmbiguous(issuerCandidates);
+      if (narrowed) return narrowed;
       anomaly = {
         reason: 'AMBIGUOUS',
         matched_accounts: [],
@@ -1458,17 +1527,17 @@ function mapProjectIdForTransfer_(transfer, indexes) {
     }
   }
 
-  // Шаг 3: memo содержит Project_ID
-  const regex = PROJECT_ID_REGEX || /\bP?\d{3,6}\b/;
-  const memoMatch = String(memo || '').match(regex);
-  if (memoMatch) {
-    const projectIdFromMemo = memoMatch[0].replace(/^P/i, ''); // Убираем P если есть
-    // Проверим, есть ли такой project_id в PROJECT_MAP
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const projectMap = parseProjectMapSheet(ss.getSheetByName(SHEET_PROJECT_MAP));
-    if (projectMap[projectIdFromMemo]) {
-      return { project_id: projectIdFromMemo, mapping_method: 'MEMO_PROJECT_ID', candidates: [projectIdFromMemo], anomaly: null };
-    }
+  // Шаг 3: для UNMAPPED принимаем только одно согласованное детерминированное решение.
+  const unmappedEvidence = narrowingEvidence();
+  let unmappedIds = null;
+  let unmappedMethod = null;
+  for (const item of unmappedEvidence) {
+    unmappedIds = unmappedIds === null ? unique(item.ids) : unmappedIds.filter(projectId => item.ids.includes(projectId));
+    if (!unmappedMethod) unmappedMethod = item.method;
+    if (!unmappedIds.length) break;
+  }
+  if (unmappedIds && unmappedIds.length === 1) {
+    return { project_id: unmappedIds[0], mapping_method: unmappedMethod, candidates: unmappedIds, anomaly: null };
   }
 
   // Шаг 4: UNMAPPED
@@ -1607,9 +1676,15 @@ function remappingProjectIds() {
   
   if (!transfersSheet || transfersSheet.getLastRow() <= 1) return;
 
+  const headers = transfersSheet.getRange(1, 1, 1, transfersSheet.getLastColumn()).getValues()[0];
+  let mappingMethodIdx = headers.indexOf('mapping_method');
+  if (mappingMethodIdx === -1) {
+    mappingMethodIdx = headers.length;
+    transfersSheet.getRange(1, mappingMethodIdx + 1).setValue('mapping_method');
+    headers.push('mapping_method');
+  }
   const dataRange = transfersSheet.getRange(2, 1, transfersSheet.getLastRow() - 1, transfersSheet.getLastColumn());
   const data = dataRange.getValues();
-  const headers = transfersSheet.getRange(1, 1, 1, transfersSheet.getLastColumn()).getValues()[0];
 
   const fromIdx = headers.indexOf('from');
   const toIdx = headers.indexOf('to');
@@ -1645,12 +1720,14 @@ function remappingProjectIds() {
       from: row[fromIdx],
       to: row[toIdx],
       asset_issuer: row[assetIssuerIdx],
+      asset_code: headers.indexOf('asset_code') === -1 ? '' : row[headers.indexOf('asset_code')],
       memo: row[memoIdx]
     };
 
     const mappingResult = mapProjectIdForTransfer_(transfer, indexes);
     if (mappingResult.project_id !== currentProjectId) {
       row[projectIdIdx] = mappingResult.project_id;
+      if (mappingMethodIdx !== -1) row[mappingMethodIdx] = mappingResult.mapping_method;
       count++;
 
       if (mappingResult.anomaly && txHash) {
@@ -4266,12 +4343,12 @@ function fetchTransactionsBetweenAddresses(fromAddr, toAddr, assetCode, assetIss
 
 // ========== Тестовая функция ==========
 function testFetchTransactionsBetweenAddresses() {
-  const fromAddr = 'GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
-  const toAddr = 'GYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY';
+  const fromAddr = 'GDH25HPTORZCNYJPOEBFLQJ76LAGSWQD3F5H22HT37MHEZGYWD3KD77W';
+  const toAddr = 'GARNOMR62CRFSI2G2OQYA5SPGFFDBBY566AWZF4637MNF74UZMBNOZVD';
   const assetCode = 'EURMTL';
-  const assetIssuer = 'GZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ';
-  const startDate = new Date('2022-01-01T00:00:00Z');
-  const endDate = new Date('2026-01-01T23:59:59Z');
+  const assetIssuer = 'GACKTN5DAZGWXRWB2WLM6OPBDHAMT6SJNGLJZPQMEZBUR4JUGBX2UK7V';
+  const startDate = new Date('2025-01-01T00:00:00Z');
+  const endDate = new Date('2026-08-12T23:59:59Z');
   try {
     fetchTransactionsBetweenAddresses(fromAddr, toAddr, assetCode, assetIssuer, startDate, endDate);
     Logger.log('Тест завершен успешно.');
@@ -4661,7 +4738,7 @@ function upgradeTransfersSheet() {
   if (!sheet) return;
   const headersRange = sheet.getRange(1, 1, 1, sheet.getLastColumn());
   const headers = headersRange.getValues()[0];
-  const newCols = ['fund_account_key', 'asset_code', 'asset_issuer', 'asset_full', 'op_id', 'direction', 'counterparty_type', 'project_id', 'class', 'class_override', 'tags'];
+  const newCols = ['fund_account_key', 'asset_code', 'asset_issuer', 'asset_full', 'op_id', 'direction', 'counterparty_type', 'project_id', 'class', 'class_override', 'tags', 'mapping_method'];
   const missing = newCols.filter(col => headers.indexOf(col) === -1);
   if (missing.length > 0) {
     headersRange.offset(0, headers.length, 1, missing.length).setValues([missing]);

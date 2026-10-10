@@ -33,6 +33,21 @@ describe('mapProjectIdForTransfer_', () => {
     }
   };
 
+  const mabizIndexes = {
+    residentsIndex: {
+      accountToProjectIds: { SHARED_ACCOUNT: ['M45171', 'M13118'] },
+      issuerToProjectIds: { SHARED_ISSUER: ['M45171', 'M13118'] }
+    },
+    projectMapIndex: {
+      tokenToProjectIds: { TOC: ['M45171'], TIC: ['M13118'] },
+      assetCodeToProjectIds: { TOC: ['M45171'], TIC: ['M13118'] },
+      projectById: {
+        M45171: { token_symbol: 'TOC' },
+        M13118: { token_symbol: 'TIC' }
+      }
+    }
+  };
+
   describe('Account-based mapping', () => {
     it('should map single project from from account', () => {
       const transfer = { from: 'GACCOUNT1', to: 'GOTHER', asset_issuer: 'GISSUER', memo: '' };
@@ -132,6 +147,71 @@ describe('mapProjectIdForTransfer_', () => {
       const result = mapProjectIdForTransfer_(transfer, mockIndexes);
       expect(result.project_id).toBe('UNMAPPED');
       expect(result.anomaly.memo).toBe('');
+    });
+  });
+
+  describe('MABIZ deterministic narrowing', () => {
+    it('maps TOC divs to M45171 from a shared account/issuer', () => {
+      const result = mapProjectIdForTransfer({
+        from: 'SHARED_ACCOUNT', to: 'GOTHER', asset_issuer: 'SHARED_ISSUER', asset_code: 'TOC', memo: 'TOC divs'
+      }, mabizIndexes);
+      expect(result).toEqual({ project_id: 'M45171', mapping_method: 'MEMO_TOKEN', candidates: ['M45171'], anomaly: null });
+    });
+
+    it('does not resolve a TIC-like memo to TOC', () => {
+      const result = mapProjectIdForTransfer({
+        from: 'SHARED_ACCOUNT', to: 'GOTHER', asset_issuer: 'SHARED_ISSUER', asset_code: 'TIC', memo: 'TIC dividends'
+      }, mabizIndexes);
+      expect(result.project_id).toBe('M13118');
+      expect(result.mapping_method).toBe('MEMO_TOKEN');
+    });
+
+    it('keeps an ambiguous historical transfer unresolved without a deterministic signal', () => {
+      const result = mapProjectIdForTransfer({
+        from: 'SHARED_ACCOUNT', to: 'GOTHER', asset_issuer: 'SHARED_ISSUER', asset_code: 'OTHER', memo: 'historical transfer'
+      }, mabizIndexes);
+      expect(result.project_id).toBe('AMBIGUOUS');
+      expect(result.anomaly.reason).toBe('AMBIGUOUS');
+    });
+
+    it('resolves a previously unmapped project ID with a word-boundary match', () => {
+      const result = mapProjectIdForTransfer({
+        from: 'UNKNOWN', to: 'OTHER', asset_issuer: 'UNKNOWN', asset_code: '', memo: 'settlement M45171'
+      }, mabizIndexes);
+      expect(result.project_id).toBe('M45171');
+      expect(result.mapping_method).toBe('MEMO_PROJECT_ID');
+    });
+
+    it('does not treat a partial token as a match', () => {
+      const result = mapProjectIdForTransfer({
+        from: 'UNKNOWN', to: 'OTHER', asset_issuer: 'UNKNOWN', asset_code: '', memo: 'TOCXYZ divs'
+      }, mabizIndexes);
+      expect(result.project_id).toBe('UNMAPPED');
+    });
+
+    it('keeps conflicting deterministic signals ambiguous', () => {
+      const result = mapProjectIdForTransfer({
+        from: 'SHARED_ACCOUNT', to: 'GOTHER', asset_issuer: 'SHARED_ISSUER', asset_code: 'TOC', memo: 'TIC dividends'
+      }, mabizIndexes);
+      expect(result.project_id).toBe('AMBIGUOUS');
+    });
+
+    it('uses asset_code alone when it is the only deterministic signal', () => {
+      const result = mapProjectIdForTransfer({
+        from: 'SHARED_ACCOUNT', to: 'GOTHER', asset_issuer: 'SHARED_ISSUER', asset_code: 'TOC', memo: 'divs'
+      }, mabizIndexes);
+      expect(result).toEqual({ project_id: 'M45171', mapping_method: 'ASSET_CODE', candidates: ['M45171'], anomaly: null });
+    });
+
+    it('supports an explicit project memo pattern without partial matching', () => {
+      const indexes = {
+        residentsIndex: { accountToProjectIds: {}, issuerToProjectIds: {} },
+        projectMapIndex: { projectMemoPatterns: { M45171: ['TOC coupon'] } }
+      };
+      expect(mapProjectIdForTransfer({ memo: 'TOC coupon paid' }, indexes)).toEqual({
+        project_id: 'M45171', mapping_method: 'PROJECT_MEMO_PATTERN', candidates: ['M45171'], anomaly: null
+      });
+      expect(mapProjectIdForTransfer({ memo: 'TOC coupons' }, indexes).project_id).toBe('UNMAPPED');
     });
   });
 

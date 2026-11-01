@@ -22,6 +22,19 @@ const SHEET_RESIDENT_TIMELINE = 'RESIDENT_TIMELINE';
 const SHEET_TOKEN_FLOWS = 'TOKEN_FLOWS';
 const SHEET_ISSUER_STRUCTURE = 'ISSUER_STRUCTURE';
 const SHEET_ACCOUNTS_META = 'ACCOUNTS_META';
+const SHEET_OFFER_TRADES = 'OFFER_TRADES';
+
+const OFFER_TRADES_HEADERS = [
+  'trade_id', 'paging_token', 'ledger', 'closed_at', 'trade_type',
+  'base_asset', 'base_asset_issuer', 'base_amount', 'base_is_seller', 'quote_asset', 'quote_asset_issuer', 'quote_amount',
+  'base_account', 'quote_account', 'fund_account', 'fund_side', 'counterparty_account', 'direction',
+  'in_scope', 'price', 'base_offer_id', 'counter_offer_id', 'tx_hash', 'linked_transfer_key',
+  'dedupe_key', 'synced_at'
+];
+const MAX_OFFER_TRADE_PAGES = 50;
+// Бюджет времени прогона: пагинация останавливается, курсор пишется по фактически обработанным страницам.
+const MAX_OFFER_TRADE_RUNTIME_MS = 4 * 60 * 1000;
+const OFFER_TRADE_LOCK_WAIT_MS = 30000;
 const SHEET_ACCOUNT_SIGNERS = 'ACCOUNT_SIGNERS';
 
 const SHEET_MAYMUN_EVENTS = 'MAYMUN_EVENTS';
@@ -141,6 +154,9 @@ function onOpen() {
     .addItem('MAYMUN: Precheck unprocessed TRANSFERS', 'runMaymunAssetLayerPrecheckUnprocessedTransfers')
     .addItem('MAYMUN: Process approved PRECHECK candidates', 'runMaymunAssetLayerProcessApprovedPrecheckCandidates')
     .addSeparator()
+    .addItem('Обновить сделки по оферам (OFFER_TRADES)', 'syncOfferTrades')
+    .addItem('OFFER_TRADES: Dry-run', 'syncOfferTradesDryRun')
+    .addSeparator()
     .addItem('Обновить Created данные аккаунтов', 'updateAccountCreationDetails')
     .addItem('Обновить метаданные аккаунтов', 'syncAccountsMeta')
     .addToUi();
@@ -154,16 +170,28 @@ function syncAllStellar() {
 
 // ========== Сброс курсоров ==========
 function resetAllCursors() {
-  const props = PropertiesService.getUserProperties();
-  const keys = props.getKeys();
-  for (const key of keys) {
-    if (key.startsWith('cursor_payments_')) props.deleteProperty(key);
+  // cursor_payments_* живут в user-scope, cursor_offer_trades_* — в script-scope.
+  const userProps = PropertiesService.getUserProperties();
+  let paymentsReset = 0;
+  for (const key of userProps.getKeys()) {
+    if (key.startsWith('cursor_payments_')) {
+      userProps.deleteProperty(key);
+      paymentsReset++;
+    }
+  }
+  const scriptProps = PropertiesService.getScriptProperties();
+  let tradesReset = 0;
+  for (const key of scriptProps.getKeys()) {
+    if (key.startsWith('cursor_offer_trades_')) {
+      scriptProps.deleteProperty(key);
+      tradesReset++;
+    }
   }
   writeDebugLog({
     timestamp: new Date().toISOString(),
     stage: 'resetAllCursors',
-    fundKey: 'ALL',
-    details: 'Все курсоры сброшены.'
+    fund_key: 'ALL',
+    details_json: `Все курсоры сброшены: payments=${paymentsReset}, offer_trades=${tradesReset}.`
   });
 }
 
@@ -3520,7 +3548,8 @@ function writeDebugLog(logObj, overwriteLast = false) {
 
   for (const h of requiredHeaders) {
     if (headerMap[h]) {
-      logArray[headerMap[h] - 1] = logObj[h] || '';
+      // ?? а не ||: 0 в счётчиках (dedup_skipped: 0) должен попадать в лог.
+      logArray[headerMap[h] - 1] = logObj[h] ?? '';
     }
   }
 
@@ -6642,6 +6671,331 @@ MAYMUN_ALLOCATIONS ${delta[SHEET_MAYMUN_ALLOCATIONS]?.delta >= 0 ? '+' : ''}${de
     ui.alert(errorMsg);
     return { runId, success: false, error: errorMsg };
   }
+}
+
+// ========== OFFER_TRADES: сделки по оферам (offer exchange) ==========
+
+function getOfferTradeCore_() {
+  const core = getDomainCore_();
+  if (typeof core.mapOfferTrade !== 'function' || typeof core.reconcileOfferTrades !== 'function') {
+    throw new Error('DomainCore.mapOfferTrade/reconcileOfferTrades недоступны');
+  }
+  return core;
+}
+
+function ensureOfferTradesSheet_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(SHEET_OFFER_TRADES);
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_OFFER_TRADES);
+    sheet.appendRow(OFFER_TRADES_HEADERS);
+    return sheet;
+  }
+  const headers = getOfferTradesHeaders_(sheet);
+  const missing = OFFER_TRADES_HEADERS.filter(h => headers.indexOf(h) === -1);
+  if (missing.length) {
+    sheet.getRange(1, headers.length + 1, 1, missing.length).setValues([missing]);
+  }
+  return sheet;
+}
+
+// Фактические заголовки листа: по ним строится строка при записи.
+function getOfferTradesHeaders_(sheet) {
+  if (!sheet || sheet.getLastColumn() < 1) return [];
+  return sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(h => String(h || '').trim());
+}
+
+function normalizeHorizonTradeRecord_(rec) {
+  // Реальный формат Horizon: counter_*, без ledger, price = {n,d}. Разбор — в DomainCore.
+  return getOfferTradeCore_().normalizeHorizonTradeRecord(rec);
+}
+
+function fetchOfferTradesForAccount_(horizon, accountId, cursor, deadline) {
+  const core = getOfferTradeCore_();
+  const records = [];
+  // accountId приходит из CONST-листа: кодируем, чтобы значение не ломало URL.
+  let next = `${horizon}/accounts/${encodeURIComponent(accountId)}/trades?order=asc&limit=200` + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
+  let pages = 0;
+  let apiCalls = 0; // фактическое число запросов к /trades, включая неуспешные
+  let lastCursor = '';
+  let truncated = false;
+  while (next) {
+    if (!core.shouldContinueTradePagination({
+      pages, maxPages: MAX_OFFER_TRADE_PAGES, deadline: deadline || 0, now: Date.now()
+    })) {
+      truncated = true; // лимит страниц или исчерпан бюджет времени прогона
+      break;
+    }
+    apiCalls++;
+    let res;
+    try {
+      res = UrlFetchApp.fetch(next, { muteHttpExceptions: true });
+    } catch (e) {
+      e.apiCalls = apiCalls; // сетевой сбой тоже считается фактическим запросом
+      throw e;
+    }
+    if (res.getResponseCode() !== 200) {
+      const err = new Error(`Horizon /trades ${res.getResponseCode()} для ${accountId}`);
+      err.apiCalls = apiCalls;
+      throw err;
+    }
+    const json = JSON.parse(res.getContentText());
+    const batch = (json._embedded && json._embedded.records) || [];
+    if (!batch.length) break;
+    for (const rec of batch) {
+      records.push(rec);
+      lastCursor = String(rec.paging_token || rec.id || '');
+    }
+    next = json._links && json._links.next && json._links.next.href;
+    pages++;
+  }
+  return { records, lastCursor, pages, apiCalls, truncated };
+}
+
+// Horizon trade не содержит tx_hash: один GET /operations/{opId} на opId, кэш на прогон.
+// Логика резолва (бюджет времени, кэш) — в DomainCore, здесь только HTTP.
+function resolveTradeTxHashes_(horizon, opIds, deadline) {
+  const result = getOfferTradeCore_().resolveTradeTxHashes(opIds, function (opId) {
+    const res = UrlFetchApp.fetch(`${horizon}/operations/${opId}`, { muteHttpExceptions: true });
+    return { status: res.getResponseCode(), body: res.getContentText() };
+  }, { deadline: deadline || 0, now: Date.now });
+  if (result.skipped || result.failed) {
+    writeDebugLog({
+      module: 'offer_trades',
+      timestamp: new Date().toISOString(),
+      stage: 'syncOfferTrades.tx_hash',
+      fund_key: 'PARTIAL',
+      api_calls: result.apiCalls,
+      details_json: `tx_hash: resolved=${result.apiCalls - result.failed}, failed=${result.failed}, ` +
+        `skipped_by_deadline=${result.skipped}`
+    });
+  }
+  return result;
+}
+
+// Курсоры OFFER_TRADES — append-only журнал, поэтому script-scope, а не user-scope.
+function getOfferTradeProps_() {
+  try {
+    return PropertiesService.getScriptProperties();
+  } catch (e) {
+    writeDebugLog({
+      module: 'offer_trades',
+      timestamp: new Date().toISOString(),
+      stage: 'syncOfferTrades.props',
+      fund_key: 'ERROR',
+      details_json: `PropertiesService недоступен: ${e.message}`
+    });
+    return null;
+  }
+}
+
+function syncOfferTrades(options) {
+  const opts = options || {};
+  const dryRun = Boolean(opts.dryRun);
+  const run_id = newRunId_();
+  const startedAt = new Date().toISOString();
+  const deadline = Date.now() + MAX_OFFER_TRADE_RUNTIME_MS;
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const constSheet = ss.getSheetByName(SHEET_CONST);
+  if (!constSheet) {
+    writeDebugLog({ run_id, module: 'offer_trades', timestamp: startedAt, stage: 'syncOfferTrades', fund_key: 'ERROR', details_json: 'CONST sheet not found' });
+    return { run_id, dryRun, fetched: 0, appended: 0, duplicateSkipped: 0, rejectedNoKey: 0, linkedTransfers: 0, errors: ['CONST sheet not found'] };
+  }
+
+  const config = parseConstSheet(constSheet);
+  const horizon = String(config.HORIZON_URL || DEFAULT_HORIZON_URL).replace(/\/+$/, '');
+  const fundAccounts = config.fundAccounts || {};
+  const fundKeys = Object.keys(fundAccounts).filter(key => String(fundAccounts[key] || '').trim());
+
+  const core = getOfferTradeCore_();
+  // Лок нужен для чтения+записи листа: параллельный запуск иначе вставит дубли.
+  // В dry-run записи нет — лок best-effort, отсутствие LockService не блокирует прогон.
+  const lockProbe = core.acquireScriptLock(
+    typeof LockService !== 'undefined' ? LockService : null,
+    OFFER_TRADE_LOCK_WAIT_MS
+  );
+  const scriptLock = lockProbe.lock;
+  const lockState = scriptLock ? 'acquired' : (lockProbe.unavailable ? 'unavailable' : 'busy');
+  if (!scriptLock && !dryRun) {
+    writeDebugLog({
+      run_id, module: 'offer_trades', timestamp: startedAt,
+      stage: 'syncOfferTrades.lock', fund_key: 'LOCK_BUSY',
+      details_json: lockProbe.unavailable
+        ? 'LockService недоступен: запись отменена, чтобы не создавать дубли'
+        : 'Лок не получен за ' + OFFER_TRADE_LOCK_WAIT_MS + ' мс: параллельный прогон, запись отменена'
+    });
+    return {
+      run_id, dryRun, fetched: 0, wouldAppend: 0, appended: 0, duplicateSkipped: 0,
+      rejectedNoKey: 0, linkedTransfers: 0, byAccount: {}, headers: [],
+      dedupeUnavailable: !ss.getSheetByName(SHEET_OFFER_TRADES), apiCalls: 0,
+      lockState, rows: [], errors: ['lock not acquired: ' + lockState]
+    };
+  }
+
+  const existingSheet = ss.getSheetByName(SHEET_OFFER_TRADES);
+  const sheet = dryRun ? existingSheet : ensureOfferTradesSheet_();
+  const syncStamp = startedAt;
+  const existingRows = existingSheet ? readSheetRowsAsObjects_(existingSheet) : [];
+  // Без листа дедуп-база пуста: would_append не является точным — помечаем явно.
+  const dedupeUnavailable = !existingSheet;
+  const sheetHeaders = sheet ? getOfferTradesHeaders_(sheet) : [];
+  const headers = sheetHeaders.length ? sheetHeaders : OFFER_TRADES_HEADERS.slice();
+
+  let totalFetched = 0;
+  let totalTradeApiCalls = 0;
+  const errors = [];
+  const pending = [];
+  const accountResults = [];
+  const opIds = [];
+
+  for (const fundKey of fundKeys) {
+    const accountId = String(fundAccounts[fundKey]).trim();
+    const cursorKey = `cursor_offer_trades_${fundKey}`;
+    const props = getOfferTradeProps_();
+    const cursor = props ? (props.getProperty(cursorKey) || '') : '';
+    try {
+      const result = fetchOfferTradesForAccount_(horizon, accountId, cursor, deadline);
+      totalFetched += result.records.length;
+      totalTradeApiCalls += result.apiCalls || 0;
+      for (const rec of result.records) {
+        opIds.push(core.offerTradeOperationId(rec.id || rec.paging_token));
+      }
+      accountResults.push({
+        fundKey, cursorKey, lastCursor: result.lastCursor,
+        truncated: result.truncated, error: '', records: result.records
+      });
+    } catch (e) {
+      totalTradeApiCalls += e.apiCalls || 0;
+      errors.push(`${fundKey}: ${e.message}`);
+      accountResults.push({ fundKey, cursorKey, lastCursor: '', truncated: false, error: e.message, records: [] });
+      writeDebugLog({
+        run_id, module: 'offer_trades', timestamp: new Date().toISOString(),
+        stage: 'syncOfferTrades.fetch', fund_key: 'ERROR',
+        details_json: `${fundKey} ${e.message}`
+      });
+    }
+  }
+
+  const txResolution = resolveTradeTxHashes_(horizon, opIds, deadline);
+  const txHashes = txResolution.cache;
+
+  // Собираем записи из уже полученных результатов (fetch выполнен выше, повторных запросов нет).
+  for (const item of accountResults) {
+    if (item.error || !item.records) continue;
+    for (const rec of item.records) {
+      const mapped = core.mapOfferTrade(normalizeHorizonTradeRecord_(rec), { fundAccounts });
+      const txHash = txHashes[core.offerTradeOperationId(mapped.trade_id)] || '';
+      pending.push(Object.assign({}, mapped, {
+        tx_hash: txHash,
+        linked_transfer_key: core.buildLinkedTransferKey(txHash, mapped.trade_id),
+        synced_at: syncStamp
+      }));
+    }
+  }
+
+  const reconciled = core.reconcileOfferTrades(existingRows, pending);
+  const plan = core.buildOfferTradeWritePlan(reconciled.fresh, { dryRun });
+  // Строка пишется по фактическим заголовкам листа — порядок константы не важен.
+  const rows = plan.rows.map(row => mapObjectToRowByHeader_(row, headers));
+  const linkedTransfers = plan.rows.filter(row => row.linked_transfer_key).length;
+
+  let written = 0;
+  if (!dryRun && rows.length && sheet) {
+    try {
+      sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
+      const closedAtIdx = headers.indexOf('closed_at') + 1;
+      if (closedAtIdx > 0) {
+        sheet.getRange(2, closedAtIdx, Math.max(sheet.getLastRow() - 1, 1), 1).setNumberFormat('dd-mm-yyyy hh:mm:ss');
+      }
+      written = rows.length;
+    } catch (e) {
+      errors.push(`write: ${e.message}`);
+      writeDebugLog({
+        run_id, module: 'offer_trades', timestamp: new Date().toISOString(),
+        stage: 'syncOfferTrades.write', fund_key: 'ERROR',
+        details_json: `setValues failed: ${e.message}`
+      });
+    }
+  }
+
+  // Итог: реальные HTTP-вызовы — все страницы /trades плюс резолв tx_hash на уникальный opId.
+  const apiCalls = totalTradeApiCalls + txResolution.apiCalls;
+
+  // Курсоры пишем только после успешной записи строк и только по аккаунтам без ошибок.
+  if (!dryRun && written === rows.length) {
+    const cursorPlan = core.planTradeCursorUpdates(accountResults);
+    const props = getOfferTradeProps_();
+    if (props) {
+      for (const update of cursorPlan.updates) props.setProperty(update.key, update.value);
+    }
+  }
+  if (dryRun && accountResults.length) {
+    writeDebugLog({
+      run_id, module: 'offer_trades', timestamp: new Date().toISOString(),
+      stage: 'syncOfferTrades.cursor', fund_key: 'DRY_RUN',
+      details_json: '[DRY_RUN] Курсоры не записаны: ' + accountResults.map(item => `${item.cursorKey}=${item.lastCursor || '-'}`).join(', ')
+    });
+  }
+
+  writeDebugLog({
+    run_id,
+    module: 'offer_trades',
+    timestamp: new Date().toISOString(),
+    stage: 'syncOfferTrades',
+    fund_key: errors.length ? 'PARTIAL' : 'SUCCESS',
+    api_calls: apiCalls,
+    rows_fetched: totalFetched,
+    rows_appended: written,
+    dedup_skipped: reconciled.skipped,
+    errors: errors.join('; '),
+    details_json: `${dryRun ? '[DRY_RUN] ' : ''}OFFER_TRADES sync: accounts=${fundKeys.length}, fetched=${totalFetched}, ` +
+      `would_append=${rows.length}, appended=${written}, duplicate_skipped=${reconciled.skipped}, ` +
+      `rejected_no_key=${reconciled.rejected_no_key}, linked_transfers=${linkedTransfers}, ` +
+      `out_of_scope=${reconciled.fresh.length - rows.length}, ` +
+      `truncated_accounts=${accountResults.filter(item => item.truncated).length}, ` +
+      `trades_calls=${totalTradeApiCalls}, lock=${lockState}, ` +
+      `tx_hash_calls=${txResolution.apiCalls}, tx_hash_failed=${txResolution.failed}, ` +
+      `tx_hash_skipped_by_deadline=${txResolution.skipped}, ` +
+      `dedupe_unavailable=${dedupeUnavailable}` +
+      (dedupeUnavailable ? ' (dedupe unavailable, sheet missing)' : '')
+  });
+
+  // Лок отпускаем явно; при исключении GAS снимает script-lock сам.
+  if (scriptLock) scriptLock.releaseLock();
+
+  return {
+    run_id,
+    dryRun,
+    fetched: totalFetched,
+    wouldAppend: rows.length,
+    appended: written,
+    duplicateSkipped: reconciled.skipped,
+    rejectedNoKey: reconciled.rejected_no_key,
+    linkedTransfers,
+    byAccount: plan.byAccount,
+    headers,
+    dedupeUnavailable,
+    lockState,
+    apiCalls: apiCalls,
+    rows,
+    errors
+  };
+}
+
+function syncOfferTradesDryRun() {
+  const result = syncOfferTrades({ dryRun: true });
+  Logger.log(JSON.stringify({
+    dryRun: result.dryRun,
+    wouldAppend: result.wouldAppend,
+    duplicateSkipped: result.duplicateSkipped,
+    rejectedNoKey: result.rejectedNoKey,
+    linkedTransfers: result.linkedTransfers,
+    byAccount: result.byAccount,
+    dedupeUnavailable: result.dedupeUnavailable,
+    apiCalls: result.apiCalls,
+    errors: result.errors
+  }));
+  return result;
 }
 
 function ping() {

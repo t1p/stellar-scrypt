@@ -682,7 +682,353 @@
     return out;
   }
 
+  function parseTradeAsset(value) {
+    if (value && typeof value === 'object') {
+      const type = String(value.asset_type || '').trim().toLowerCase();
+      if (type === 'native') return { code: 'XLM', issuer: '' };
+      return {
+        code: String(value.asset_code || '').trim(),
+        issuer: String(value.asset_issuer || '').trim()
+      };
+    }
+    const raw = String(value || '').trim();
+    if (!raw) return { code: '', issuer: '' };
+    const upper = raw.toUpperCase();
+    if (upper === 'XLM' || upper === 'NATIVE') return { code: 'XLM', issuer: '' };
+    const parts = raw.split(':');
+    return { code: String(parts[0] || '').trim(), issuer: String(parts[1] || '').trim() };
+  }
+
+  function parseTradeTimestamp(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return null;
+    const parsed = new Date(raw);
+    return isNaN(parsed.getTime()) ? null : parsed;
+  }
+
+  // Horizon отдаёт цену объектом {n, d}; в старых/тестовых данных встречается число или строка.
+  function parseTradePrice(value) {
+    if (value === undefined || value === null || value === '') return null;
+    if (typeof value === 'object') {
+      const n = Number(value.n);
+      const d = Number(value.d);
+      if (!isFinite(n) || !isFinite(d) || d === 0) return null;
+      return n / d;
+    }
+    const num = Number(value);
+    return isFinite(num) ? num : null;
+  }
+
+  // Horizon trade не содержит поля ledger: восстанавливаем из sequence-type id.
+  // id = <operation_id>-<trade_index>, operation_id = ledger * 2^32 + внутриледжерный номер.
+  // Делим целочисленно через BigInt: float на верхней границе intra-значения даёт ledger +1.
+  function deriveLedgerFromTradeId(tradeId) {
+    const operationToken = String(tradeId || '').split('-')[0].trim();
+    if (!/^\d+$/.test(operationToken)) return '';
+    try {
+      const ledger = Number(BigInt(operationToken) / BigInt(4294967296));
+      return ledger > 0 ? ledger : '';
+    } catch (e) {
+      return '';
+    }
+  }
+
+  // Реальный ответ Horizon /accounts/{id}/trades: поля counter_*, ledger и tx_hash отсутствуют.
+  function normalizeHorizonTradeRecord(record) {
+    const row = record || {};
+    const assetOf = function (typeKey, codeKey, issuerKey) {
+      return row[typeKey]
+        ? { asset_type: row[typeKey], asset_code: row[codeKey], asset_issuer: row[issuerKey] }
+        : '';
+    };
+    const tradeId = String(row.id || row.paging_token || '').trim();
+    return {
+      id: String(row.id || '').trim(),
+      trade_id: tradeId,
+      paging_token: String(row.paging_token || tradeId).trim(),
+      ledger: deriveLedgerFromTradeId(tradeId),
+      ledger_close_time: row.ledger_close_time,
+      trade_type: row.trade_type || 'orderbook',
+      base_asset: assetOf('base_asset_type', 'base_asset_code', 'base_asset_issuer'),
+      base_amount: row.base_amount,
+      base_account: row.base_account,
+      base_is_seller: row.base_is_seller,
+      quote_asset: assetOf('counter_asset_type', 'counter_asset_code', 'counter_asset_issuer'),
+      quote_amount: row.counter_amount,
+      quote_account: row.counter_account,
+      base_offer_id: row.base_offer_id || row.offer_id,
+      counter_offer_id: row.counter_offer_id,
+      price: row.price,
+      tx_hash: row.tx_hash,
+      linked_transfer_key: row.linked_transfer_key
+    };
+  }
+
+  function mapOfferTrade(record, options) {
+    const row = record || {};
+    const opts = options || {};
+    const fundAccounts = Object.keys(opts.fundAccounts || {})
+      .map(function (key) { return String(opts.fundAccounts[key] || '').trim(); })
+      .filter(Boolean);
+    const base = parseTradeAsset(row.base_asset);
+    const quote = parseTradeAsset(row.quote_asset);
+    const baseAccount = String(row.base_account || '').trim();
+    const quoteAccount = String(row.quote_account || '').trim();
+    const baseIsFund = fundAccounts.indexOf(baseAccount) >= 0;
+    const quoteIsFund = fundAccounts.indexOf(quoteAccount) >= 0;
+    const fundAccount = baseIsFund ? baseAccount : (quoteIsFund ? quoteAccount : '');
+    const fundSide = !fundAccount ? '' : (fundAccount === baseAccount ? 'base' : 'quote');
+    const counterpartyAccount = fundSide === 'base' ? quoteAccount : (fundSide === 'quote' ? baseAccount : '');
+    const tradeId = String(row.trade_id || row.paging_token || '').trim();
+    const baseAmount = Number(row.base_amount || 0);
+    const quoteAmount = Number(row.quote_amount || 0);
+    const horizonPrice = parseTradePrice(row.price);
+    const ledgerValue = row.ledger === undefined || row.ledger === null || row.ledger === ''
+      ? deriveLedgerFromTradeId(tradeId)
+      : row.ledger;
+
+    return {
+      trade_id: tradeId,
+      id: String(row.id || '').trim(),
+      paging_token: String(row.paging_token || tradeId).trim(),
+      ledger: ledgerValue === '' ? '' : String(ledgerValue),
+      closed_at: parseTradeTimestamp(row.ledger_close_time || row.ledger_close_at || row.closed_at),
+      trade_type: String(row.trade_type || '').trim(),
+      base_asset: base.code,
+      base_asset_issuer: base.issuer,
+      base_amount: baseAmount,
+      quote_asset: quote.code,
+      quote_asset_issuer: quote.issuer,
+      quote_amount: quoteAmount,
+      base_account: baseAccount,
+      quote_account: quoteAccount,
+      fund_account: fundAccount,
+      fund_side: fundSide,
+      counterparty_account: counterpartyAccount,
+      // Правило направления см. docs/OFFER_TRADES_IMPORT.md, раздел «direction».
+      direction: fundSide === 'base' ? 'OUT' : (fundSide === 'quote' ? 'IN' : ''),
+      in_scope: Boolean(fundAccount),
+      price: horizonPrice === null ? (baseAmount > 0 ? quoteAmount / baseAmount : 0) : horizonPrice,
+      base_offer_id: row.base_offer_id === undefined || row.base_offer_id === null ? '' : String(row.base_offer_id),
+      counter_offer_id: row.counter_offer_id === undefined || row.counter_offer_id === null ? '' : String(row.counter_offer_id),
+      base_is_seller: row.base_is_seller === true ? true : (row.base_is_seller === false ? false : ''),
+      tx_hash: String(row.tx_hash || '').trim(),
+      linked_transfer_key: String(row.linked_transfer_key || '').trim()
+    };
+  }
+
+  // Числовой trade_id в листе пишется без суффикса индекса: '<opId>' и '<opId>-0' — одно исполнение.
+  function normalizeTradeIdKey(tradeId) {
+    const raw = String(tradeId === undefined || tradeId === null ? '' : tradeId).trim().toLowerCase();
+    if (!raw) return '';
+    const match = /^(\d+)(?:-(\d+))?$/.exec(raw);
+    if (!match) return raw;
+    return match[1] + '-' + (match[2] || '0');
+  }
+
+  // 18-значный opId не представим в double: Sheets хранит такую ячейку числом и теряет точность.
+  // Поэтому к ключу добавляем его double-форму как алиас — она уже была бы записана в лист.
+  // ponytail: соседние opId в пределах ошибки double склеятся; такие данные испорчены самим листом.
+  function tradeIdLookupKeys(key) {
+    const text = String(key || '');
+    if (!text) return [];
+    const match = /^(\d+)-(\d+)$/.exec(text);
+    if (!match || Number.isSafeInteger(Number(match[1]))) return [text];
+    return [text, String(Number(match[1])) + '-' + match[2]];
+  }
+
+  function offerTradeDedupeKey(row) {
+    const trade = row || {};
+    const tradeId = normalizeTradeIdKey(trade.trade_id || trade.paging_token);
+    if (tradeId) return tradeId;
+    // Без id Horizon-трейда и без trade_id/paging_token строка не идентифицируема.
+    const horizonId = String(trade.id || '').trim().toLowerCase();
+    if (!horizonId) return '';
+    const parts = [
+      horizonId, trade.ledger, trade.base_account, trade.quote_account,
+      trade.base_asset, trade.base_amount, trade.quote_asset, trade.quote_amount,
+      trade.base_offer_id, trade.counter_offer_id, trade.base_is_seller, trade.tx_hash
+    ].map(function (value) {
+      return String(value === undefined || value === null ? '' : value).trim().toLowerCase();
+    });
+    return 'fallback:' + parts.join('|');
+  }
+
+  function reconcileOfferTrades(existingRows, incomingRows, options) {
+    const opts = options || {};
+    const known = {};
+    (Array.isArray(existingRows) ? existingRows : []).forEach(function (row) {
+      const isScalar = typeof row === 'string' || typeof row === 'number';
+      const key = isScalar ? normalizeTradeIdKey(row) : offerTradeDedupeKey(row);
+      tradeIdLookupKeys(key).forEach(function (alias) { known[alias] = true; });
+    });
+
+    const fresh = [];
+    const duplicates = [];
+    let rejectedNoKey = 0;
+    (Array.isArray(incomingRows) ? incomingRows : []).forEach(function (row) {
+      const mapped = row && (row.trade_id || row.paging_token) ? row : mapOfferTrade(row, opts);
+      const key = offerTradeDedupeKey(mapped);
+      if (!key) {
+        rejectedNoKey++;
+        return;
+      }
+      // Ключ пишем точный; для поиска используем и double-алиас числовой записи из листа.
+      if (tradeIdLookupKeys(key).some(function (alias) { return known[alias]; })) {
+        duplicates.push(mapped);
+        return;
+      }
+      tradeIdLookupKeys(key).forEach(function (alias) { known[alias] = true; });
+      fresh.push(Object.assign({}, mapped, { dedupe_key: key }));
+    });
+
+    fresh.sort(function (a, b) {
+      const ledgerDiff = Number(a.ledger || 0) - Number(b.ledger || 0);
+      if (ledgerDiff !== 0) return ledgerDiff;
+      return String(a.trade_id || '').localeCompare(String(b.trade_id || ''));
+    });
+
+    return {
+      fresh: fresh,
+      duplicates: duplicates,
+      appended: fresh.length,
+      skipped: duplicates.length,
+      rejected_no_key: rejectedNoKey
+    };
+  }
+
+  // opId операции из trade_id вида "<opId>-<tradeIndex>".
+  function offerTradeOperationId(tradeId) {
+    const token = String(tradeId || '').split('-')[0].trim();
+    return /^\d+$/.test(token) ? token : '';
+  }
+
+  // Связка trade ↔ строка TRANSFERS: "<tx_hash>:<opId>".
+  function buildLinkedTransferKey(txHash, tradeId) {
+    const hash = String(txHash || '').trim();
+    const opId = offerTradeOperationId(tradeId);
+    return hash && opId ? hash + ':' + opId : '';
+  }
+
+  // План записи: только строки в скоупе, с идентификатором.
+  function buildOfferTradeWritePlan(freshRows, options) {
+    const opts = options || {};
+    const rows = (Array.isArray(freshRows) ? freshRows : []).filter(function (row) {
+      return Boolean(row && row.in_scope !== false && row.trade_id);
+    });
+    const byAccount = {};
+    rows.forEach(function (row) {
+      const key = String(row.fund_account || 'UNKNOWN');
+      byAccount[key] = (byAccount[key] || 0) + 1;
+    });
+    return {
+      dryRun: Boolean(opts.dryRun),
+      rows: rows,
+      wouldAppend: rows.length,
+      byAccount: byAccount
+    };
+  }
+
+  // Курсоры сохраняем только по аккаунтам без ошибок и только после успешной записи строк.
+  function planTradeCursorUpdates(results) {
+    const updates = [];
+    const errors = [];
+    (Array.isArray(results) ? results : []).forEach(function (item) {
+      const result = item || {};
+      if (result.error) {
+        errors.push(String(result.fundKey || '') + ': ' + String(result.error));
+        return;
+      }
+      if (result.lastCursor && result.cursorKey) {
+        updates.push({ key: String(result.cursorKey), value: String(result.lastCursor) });
+      }
+    });
+    return { updates: updates, errors: errors };
+  }
+
+  // Резолв tx_hash по opId: один вызов на уникальный opId, с бюджетом времени прогона.
+  // Неразрешённые opId остаются с пустым хешем — строка всё равно пишется.
+  function resolveTradeTxHashes(opIds, fetchOperation, options) {
+    const opts = options || {};
+    const deadline = Number(opts.deadline || 0);
+    const now = typeof opts.now === 'function' ? opts.now : Date.now;
+    const cache = {};
+    let apiCalls = 0;
+    let failed = 0;
+    let skipped = 0;
+    (Array.isArray(opIds) ? opIds : []).forEach(function (rawOpId) {
+      const opId = String(rawOpId || '').trim();
+      if (!opId) return;
+      if (Object.prototype.hasOwnProperty.call(cache, opId)) return;
+      if (deadline > 0 && Number(now()) > deadline) {
+        skipped++;
+        return;
+      }
+      cache[opId] = '';
+      apiCalls++;
+      try {
+        const response = fetchOperation(opId) || {};
+        if (Number(response.status) !== 200) {
+          failed++;
+          return;
+        }
+        const json = JSON.parse(String(response.body || '{}'));
+        cache[opId] = String(json.transaction_hash || '').trim();
+      } catch (e) {
+        // недоступная операция → пустой tx_hash и пустой linked_transfer_key
+        failed++;
+      }
+    });
+    return { cache: cache, apiCalls: apiCalls, failed: failed, skipped: skipped };
+  }
+
+  // Script-lock для чтения/записи листа. LockService в тестах недоступен — не падаем,
+  // но и не выдаём себя за успешно захваченный лок (unavailable отдельным флагом).
+  function acquireScriptLock(lockService, timeoutMs) {
+    try {
+      if (!lockService || typeof lockService.getScriptLock !== 'function') {
+        return { lock: null, unavailable: true };
+      }
+      const lock = lockService.getScriptLock();
+      if (!lock || typeof lock.tryLock !== 'function') {
+        return { lock: null, unavailable: true };
+      }
+      if (!lock.tryLock(Number(timeoutMs || 0))) {
+        return { lock: null, unavailable: false };
+      }
+      return { lock: lock, unavailable: false };
+    } catch (e) {
+      return { lock: null, unavailable: true };
+    }
+  }
+
+  function shouldContinueTradePagination(state) {
+    const input = state || {};
+    const pages = Number(input.pages || 0);
+    const maxPages = Number(input.maxPages || 0);
+    if (maxPages > 0 && pages >= maxPages) return false;
+    const deadline = Number(input.deadline || 0);
+    if (deadline > 0 && Number(input.now || 0) > deadline) return false;
+    return true;
+  }
+
   const api = {
+    parseTradeAsset,
+    parseTradePrice,
+    deriveLedgerFromTradeId,
+    normalizeHorizonTradeRecord,
+    offerTradeOperationId,
+    buildLinkedTransferKey,
+    mapOfferTrade,
+    normalizeTradeIdKey,
+    tradeIdLookupKeys,
+    offerTradeDedupeKey,
+    reconcileOfferTrades,
+    buildOfferTradeWritePlan,
+    planTradeCursorUpdates,
+    resolveTradeTxHashes,
+    acquireScriptLock,
+    shouldContinueTradePagination,
     normalizeAssetKey,
     normalizeTokenPart,
     parseTokenFilter,

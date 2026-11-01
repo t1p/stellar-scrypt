@@ -721,11 +721,16 @@
 
   // Horizon trade не содержит поля ledger: восстанавливаем из sequence-type id.
   // id = <operation_id>-<trade_index>, operation_id = ledger * 2^32 + внутриледжерный номер.
+  // Делим целочисленно через BigInt: float на верхней границе intra-значения даёт ledger +1.
   function deriveLedgerFromTradeId(tradeId) {
     const operationToken = String(tradeId || '').split('-')[0].trim();
-    const seq = Number(operationToken);
-    if (!isFinite(seq) || seq <= 0) return '';
-    return Math.floor(seq / 4294967296);
+    if (!/^\d+$/.test(operationToken)) return '';
+    try {
+      const ledger = Number(BigInt(operationToken) / BigInt(4294967296));
+      return ledger > 0 ? ledger : '';
+    } catch (e) {
+      return '';
+    }
   }
 
   // Реальный ответ Horizon /accounts/{id}/trades: поля counter_*, ledger и tx_hash отсутствуют.
@@ -812,9 +817,29 @@
     };
   }
 
+  // Числовой trade_id в листе пишется без суффикса индекса: '<opId>' и '<opId>-0' — одно исполнение.
+  function normalizeTradeIdKey(tradeId) {
+    const raw = String(tradeId === undefined || tradeId === null ? '' : tradeId).trim().toLowerCase();
+    if (!raw) return '';
+    const match = /^(\d+)(?:-(\d+))?$/.exec(raw);
+    if (!match) return raw;
+    return match[1] + '-' + (match[2] || '0');
+  }
+
+  // 18-значный opId не представим в double: Sheets хранит такую ячейку числом и теряет точность.
+  // Поэтому к ключу добавляем его double-форму как алиас — она уже была бы записана в лист.
+  // ponytail: соседние opId в пределах ошибки double склеятся; такие данные испорчены самим листом.
+  function tradeIdLookupKeys(key) {
+    const text = String(key || '');
+    if (!text) return [];
+    const match = /^(\d+)-(\d+)$/.exec(text);
+    if (!match || Number.isSafeInteger(Number(match[1]))) return [text];
+    return [text, String(Number(match[1])) + '-' + match[2]];
+  }
+
   function offerTradeDedupeKey(row) {
     const trade = row || {};
-    const tradeId = String(trade.trade_id || trade.paging_token || '').trim().toLowerCase();
+    const tradeId = normalizeTradeIdKey(trade.trade_id || trade.paging_token);
     if (tradeId) return tradeId;
     // Без id Horizon-трейда и без trade_id/paging_token строка не идентифицируема.
     const horizonId = String(trade.id || '').trim().toLowerCase();
@@ -833,8 +858,9 @@
     const opts = options || {};
     const known = {};
     (Array.isArray(existingRows) ? existingRows : []).forEach(function (row) {
-      const key = typeof row === 'string' ? String(row).trim().toLowerCase() : offerTradeDedupeKey(row);
-      if (key) known[key] = true;
+      const isScalar = typeof row === 'string' || typeof row === 'number';
+      const key = isScalar ? normalizeTradeIdKey(row) : offerTradeDedupeKey(row);
+      tradeIdLookupKeys(key).forEach(function (alias) { known[alias] = true; });
     });
 
     const fresh = [];
@@ -847,11 +873,12 @@
         rejectedNoKey++;
         return;
       }
-      if (known[key]) {
+      // Ключ пишем точный; для поиска используем и double-алиас числовой записи из листа.
+      if (tradeIdLookupKeys(key).some(function (alias) { return known[alias]; })) {
         duplicates.push(mapped);
         return;
       }
-      known[key] = true;
+      tradeIdLookupKeys(key).forEach(function (alias) { known[alias] = true; });
       fresh.push(Object.assign({}, mapped, { dedupe_key: key }));
     });
 
@@ -955,6 +982,26 @@
     return { cache: cache, apiCalls: apiCalls, failed: failed, skipped: skipped };
   }
 
+  // Script-lock для чтения/записи листа. LockService в тестах недоступен — не падаем,
+  // но и не выдаём себя за успешно захваченный лок (unavailable отдельным флагом).
+  function acquireScriptLock(lockService, timeoutMs) {
+    try {
+      if (!lockService || typeof lockService.getScriptLock !== 'function') {
+        return { lock: null, unavailable: true };
+      }
+      const lock = lockService.getScriptLock();
+      if (!lock || typeof lock.tryLock !== 'function') {
+        return { lock: null, unavailable: true };
+      }
+      if (!lock.tryLock(Number(timeoutMs || 0))) {
+        return { lock: null, unavailable: false };
+      }
+      return { lock: lock, unavailable: false };
+    } catch (e) {
+      return { lock: null, unavailable: true };
+    }
+  }
+
   function shouldContinueTradePagination(state) {
     const input = state || {};
     const pages = Number(input.pages || 0);
@@ -973,11 +1020,14 @@
     offerTradeOperationId,
     buildLinkedTransferKey,
     mapOfferTrade,
+    normalizeTradeIdKey,
+    tradeIdLookupKeys,
     offerTradeDedupeKey,
     reconcileOfferTrades,
     buildOfferTradeWritePlan,
     planTradeCursorUpdates,
     resolveTradeTxHashes,
+    acquireScriptLock,
     shouldContinueTradePagination,
     normalizeAssetKey,
     normalizeTokenPart,

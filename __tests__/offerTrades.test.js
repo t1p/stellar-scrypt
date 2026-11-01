@@ -11,6 +11,9 @@ const {
   buildOfferTradeWritePlan,
   planTradeCursorUpdates,
   resolveTradeTxHashes,
+  acquireScriptLock,
+  normalizeTradeIdKey,
+  tradeIdLookupKeys,
   shouldContinueTradePagination
 } = require('../clasp/DomainCore');
 
@@ -72,6 +75,21 @@ describe('parseTradePrice / deriveLedgerFromTradeId', () => {
     expect(deriveLedgerFromTradeId('278237954349006849-0')).toBe(64782322);
     expect(deriveLedgerFromTradeId('')).toBe('');
     expect(deriveLedgerFromTradeId('abc-1')).toBe('');
+  });
+
+  it('keeps ledger exact on the upper intra-ledger boundary (no float +1)', () => {
+    // 64330650 * 2^32 + 4294967295: Math.floor(Number/2^32) даёт 64330651.
+    expect(deriveLedgerFromTradeId('276298042175389695-0')).toBe(64330650);
+    expect(deriveLedgerFromTradeId('276298042175389695')).toBe(64330650);
+  });
+
+  it('returns empty ledger for garbage without throwing', () => {
+    expect(deriveLedgerFromTradeId('не-число')).toBe('');
+    expect(deriveLedgerFromTradeId('1e30-0')).toBe('');
+    expect(deriveLedgerFromTradeId('-5')).toBe('');
+    expect(deriveLedgerFromTradeId('0')).toBe('');
+    expect(deriveLedgerFromTradeId(null)).toBe('');
+    expect(deriveLedgerFromTradeId(undefined)).toBe('');
   });
 
   it('extracts operation id and builds linked transfer key', () => {
@@ -197,6 +215,25 @@ describe('offerTradeDedupeKey', () => {
     expect(offerTradeDedupeKey({ trade_id: '278237954349006849-0' })).toBe('278237954349006849-0');
   });
 
+  it('normalizes missing trade index to "-0"', () => {
+    expect(normalizeTradeIdKey('278237954349006849')).toBe('278237954349006849-0');
+    expect(normalizeTradeIdKey('278237954349006849-1')).toBe('278237954349006849-1');
+    expect(normalizeTradeIdKey('')).toBe('');
+    expect(normalizeTradeIdKey(null)).toBe('');
+    expect(normalizeTradeIdKey(undefined)).toBe('');
+  });
+
+  it('keeps exact id text and aliases its double form', () => {
+    // Текст остаётся точным, а double-форма числовой ячейки листа идёт отдельным алиасом.
+    expect(normalizeTradeIdKey('276298037880643585-0')).toBe('276298037880643585-0');
+    expect(normalizeTradeIdKey(276298037880643585)).toBe('276298037880643600-0');
+    expect(tradeIdLookupKeys('276298037880643585-0')).toEqual([
+      '276298037880643585-0',
+      '276298037880643600-0'
+    ]);
+    expect(tradeIdLookupKeys('123-0')).toEqual(['123-0']);
+  });
+
   it('returns empty key when no identifier at all', () => {
     expect(offerTradeDedupeKey({})).toBe('');
     expect(offerTradeDedupeKey({ base_amount: 1, quote_amount: 1 })).toBe('');
@@ -273,6 +310,27 @@ describe('reconcileOfferTrades', () => {
 
     expect(result.fresh).toHaveLength(1);
     expect(result.fresh[0].trade_id).toBe('278237954349006849-0');
+    expect(result.skipped).toBe(1);
+  });
+
+  it('treats numeric sheet trade_id and "-0" incoming id as the same execution', () => {
+    // Sheets хранит trade_id как число: '276298037880643585' без суффикса индекса.
+    const result = reconcileOfferTrades([276298037880643585], [mapA()], { fundAccounts });
+
+    expect(result.fresh).toHaveLength(0);
+    expect(result.skipped).toBe(1);
+  });
+
+  it('keeps "-1" trade of the same operation as a separate row', () => {
+    const secondInTx = Object.assign({}, horizonTradeA, { id: '276298037880643585-1' });
+    const result = reconcileOfferTrades(
+      ['276298037880643585'],
+      [mapA(), normalizeHorizonTradeRecord(secondInTx)],
+      { fundAccounts }
+    );
+
+    expect(result.fresh).toHaveLength(1);
+    expect(result.fresh[0].trade_id).toBe('276298037880643585-1');
     expect(result.skipped).toBe(1);
   });
 
@@ -407,5 +465,28 @@ describe('resolveTradeTxHashes', () => {
     expect(result.skipped).toBe(1);
     expect(result.cache['276298037880643585']).toBe(TX_A);
     expect(result.cache['278237954349006849']).toBeUndefined();
+  });
+});
+
+describe('acquireScriptLock', () => {
+  it('returns unavailable instead of false success when LockService missing', () => {
+    expect(acquireScriptLock(null, 30000)).toEqual({ lock: null, unavailable: true });
+    expect(acquireScriptLock({}, 30000)).toEqual({ lock: null, unavailable: true });
+    expect(acquireScriptLock({ getScriptLock: () => { throw new Error('no lock'); } }, 30000))
+      .toEqual({ lock: null, unavailable: true });
+  });
+
+  it('reports busy when the lock is already held', () => {
+    const held = { tryLock: () => false };
+    expect(acquireScriptLock({ getScriptLock: () => held }, 30000))
+      .toEqual({ lock: null, unavailable: false });
+  });
+
+  it('returns the acquired lock', () => {
+    const lock = { tryLock: () => true, releaseLock: () => {} };
+    const probe = acquireScriptLock({ getScriptLock: () => lock }, 30000);
+
+    expect(probe.unavailable).toBe(false);
+    expect(probe.lock).toBe(lock);
   });
 });

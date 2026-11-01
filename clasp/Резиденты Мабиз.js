@@ -34,6 +34,7 @@ const OFFER_TRADES_HEADERS = [
 const MAX_OFFER_TRADE_PAGES = 50;
 // Бюджет времени прогона: пагинация останавливается, курсор пишется по фактически обработанным страницам.
 const MAX_OFFER_TRADE_RUNTIME_MS = 4 * 60 * 1000;
+const OFFER_TRADE_LOCK_WAIT_MS = 30000;
 const SHEET_ACCOUNT_SIGNERS = 'ACCOUNT_SIGNERS';
 
 const SHEET_MAYMUN_EVENTS = 'MAYMUN_EVENTS';
@@ -6712,8 +6713,10 @@ function normalizeHorizonTradeRecord_(rec) {
 function fetchOfferTradesForAccount_(horizon, accountId, cursor, deadline) {
   const core = getOfferTradeCore_();
   const records = [];
-  let next = `${horizon}/accounts/${accountId}/trades?order=asc&limit=200` + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
+  // accountId приходит из CONST-листа: кодируем, чтобы значение не ломало URL.
+  let next = `${horizon}/accounts/${encodeURIComponent(accountId)}/trades?order=asc&limit=200` + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
   let pages = 0;
+  let apiCalls = 0; // фактическое число запросов к /trades, включая неуспешные
   let lastCursor = '';
   let truncated = false;
   while (next) {
@@ -6723,9 +6726,18 @@ function fetchOfferTradesForAccount_(horizon, accountId, cursor, deadline) {
       truncated = true; // лимит страниц или исчерпан бюджет времени прогона
       break;
     }
-    const res = UrlFetchApp.fetch(next, { muteHttpExceptions: true });
+    apiCalls++;
+    let res;
+    try {
+      res = UrlFetchApp.fetch(next, { muteHttpExceptions: true });
+    } catch (e) {
+      e.apiCalls = apiCalls; // сетевой сбой тоже считается фактическим запросом
+      throw e;
+    }
     if (res.getResponseCode() !== 200) {
-      throw new Error(`Horizon /trades ${res.getResponseCode()} для ${accountId}`);
+      const err = new Error(`Horizon /trades ${res.getResponseCode()} для ${accountId}`);
+      err.apiCalls = apiCalls;
+      throw err;
     }
     const json = JSON.parse(res.getContentText());
     const batch = (json._embedded && json._embedded.records) || [];
@@ -6737,7 +6749,7 @@ function fetchOfferTradesForAccount_(horizon, accountId, cursor, deadline) {
     next = json._links && json._links.next && json._links.next.href;
     pages++;
   }
-  return { records, lastCursor, pages, truncated };
+  return { records, lastCursor, pages, apiCalls, truncated };
 }
 
 // Horizon trade не содержит tx_hash: один GET /operations/{opId} на opId, кэш на прогон.
@@ -6796,6 +6808,30 @@ function syncOfferTrades(options) {
   const fundKeys = Object.keys(fundAccounts).filter(key => String(fundAccounts[key] || '').trim());
 
   const core = getOfferTradeCore_();
+  // Лок нужен для чтения+записи листа: параллельный запуск иначе вставит дубли.
+  // В dry-run записи нет — лок best-effort, отсутствие LockService не блокирует прогон.
+  const lockProbe = core.acquireScriptLock(
+    typeof LockService !== 'undefined' ? LockService : null,
+    OFFER_TRADE_LOCK_WAIT_MS
+  );
+  const scriptLock = lockProbe.lock;
+  const lockState = scriptLock ? 'acquired' : (lockProbe.unavailable ? 'unavailable' : 'busy');
+  if (!scriptLock && !dryRun) {
+    writeDebugLog({
+      run_id, module: 'offer_trades', timestamp: startedAt,
+      stage: 'syncOfferTrades.lock', fund_key: 'LOCK_BUSY',
+      details_json: lockProbe.unavailable
+        ? 'LockService недоступен: запись отменена, чтобы не создавать дубли'
+        : 'Лок не получен за ' + OFFER_TRADE_LOCK_WAIT_MS + ' мс: параллельный прогон, запись отменена'
+    });
+    return {
+      run_id, dryRun, fetched: 0, wouldAppend: 0, appended: 0, duplicateSkipped: 0,
+      rejectedNoKey: 0, linkedTransfers: 0, byAccount: {}, headers: [],
+      dedupeUnavailable: !ss.getSheetByName(SHEET_OFFER_TRADES), apiCalls: 0,
+      lockState, rows: [], errors: ['lock not acquired: ' + lockState]
+    };
+  }
+
   const existingSheet = ss.getSheetByName(SHEET_OFFER_TRADES);
   const sheet = dryRun ? existingSheet : ensureOfferTradesSheet_();
   const syncStamp = startedAt;
@@ -6806,6 +6842,7 @@ function syncOfferTrades(options) {
   const headers = sheetHeaders.length ? sheetHeaders : OFFER_TRADES_HEADERS.slice();
 
   let totalFetched = 0;
+  let totalTradeApiCalls = 0;
   const errors = [];
   const pending = [];
   const accountResults = [];
@@ -6819,6 +6856,7 @@ function syncOfferTrades(options) {
     try {
       const result = fetchOfferTradesForAccount_(horizon, accountId, cursor, deadline);
       totalFetched += result.records.length;
+      totalTradeApiCalls += result.apiCalls || 0;
       for (const rec of result.records) {
         opIds.push(core.offerTradeOperationId(rec.id || rec.paging_token));
       }
@@ -6827,6 +6865,7 @@ function syncOfferTrades(options) {
         truncated: result.truncated, error: '', records: result.records
       });
     } catch (e) {
+      totalTradeApiCalls += e.apiCalls || 0;
       errors.push(`${fundKey}: ${e.message}`);
       accountResults.push({ fundKey, cursorKey, lastCursor: '', truncated: false, error: e.message, records: [] });
       writeDebugLog({
@@ -6879,6 +6918,9 @@ function syncOfferTrades(options) {
     }
   }
 
+  // Итог: реальные HTTP-вызовы — все страницы /trades плюс резолв tx_hash на уникальный opId.
+  const apiCalls = totalTradeApiCalls + txResolution.apiCalls;
+
   // Курсоры пишем только после успешной записи строк и только по аккаунтам без ошибок.
   if (!dryRun && written === rows.length) {
     const cursorPlan = core.planTradeCursorUpdates(accountResults);
@@ -6901,8 +6943,7 @@ function syncOfferTrades(options) {
     timestamp: new Date().toISOString(),
     stage: 'syncOfferTrades',
     fund_key: errors.length ? 'PARTIAL' : 'SUCCESS',
-    // Реальные HTTP-вызовы: по одному /trades на аккаунт плюс резолв tx_hash на уникальный opId.
-    api_calls: fundKeys.length + txResolution.apiCalls,
+    api_calls: apiCalls,
     rows_fetched: totalFetched,
     rows_appended: written,
     dedup_skipped: reconciled.skipped,
@@ -6912,11 +6953,15 @@ function syncOfferTrades(options) {
       `rejected_no_key=${reconciled.rejected_no_key}, linked_transfers=${linkedTransfers}, ` +
       `out_of_scope=${reconciled.fresh.length - rows.length}, ` +
       `truncated_accounts=${accountResults.filter(item => item.truncated).length}, ` +
+      `trades_calls=${totalTradeApiCalls}, lock=${lockState}, ` +
       `tx_hash_calls=${txResolution.apiCalls}, tx_hash_failed=${txResolution.failed}, ` +
       `tx_hash_skipped_by_deadline=${txResolution.skipped}, ` +
       `dedupe_unavailable=${dedupeUnavailable}` +
       (dedupeUnavailable ? ' (dedupe unavailable, sheet missing)' : '')
   });
+
+  // Лок отпускаем явно; при исключении GAS снимает script-lock сам.
+  if (scriptLock) scriptLock.releaseLock();
 
   return {
     run_id,
@@ -6930,7 +6975,8 @@ function syncOfferTrades(options) {
     byAccount: plan.byAccount,
     headers,
     dedupeUnavailable,
-    apiCalls: fundKeys.length + txResolution.apiCalls,
+    lockState,
+    apiCalls: apiCalls,
     rows,
     errors
   };

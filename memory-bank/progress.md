@@ -1,7 +1,7 @@
 # Progress
 
 Этот файл отслеживает прогресс проекта в формате списка задач.
-2026-04-22 14:25:07 - Последняя редакция базового описания.
+2026-11-01 22:55:04 - Последняя редакция базового описания.
 
 ## Правила редактирования
 
@@ -9,9 +9,16 @@
 * Всегда включать временную метку в формате [ГГГГ-ММ-ДД ЧЧ:ММ:СС] - [Краткое описание изменения].
 * Записи в разделах должны быть отсортированы в обратном хронологическом порядке (самые новые сверху, старые внизу).
 * Разделы должны быть отсортированы по важности: Выполненные задачи, Текущие задачи, Следующие шаги, Последние обновления.
-2026-04-22 14:25:07 - Последняя редакция правил редактирования.
+2026-11-01 22:55:04 - Последняя редакция правил редактирования.
 
 ## Выполненные задачи
+2026-11-01 22:55:04 - Git приведён в порядок: PR #3 (`feature/maymun-allocation-runway-manual`), PR #4 (`feature/maymun-precheck-candidates-queue`), PR #2 (`feature/maymun-selected-transfer-write`) слиты в `main`; удалена `feature/maymun-asset-layer-sheets` (дубликат PR #1) и три слитые ветки; `main` = `bd37f31`.
+2026-11-01 22:55:04 - Создана ветка `feature/imtabak-offer-trades-import` от `main`, открыт DRAFT PR #5 → `main`, 4 коммита: `2a28f68`, `683a636`, `718969b`, `08fd814`.
+2026-11-01 22:55:04 - Реализован импорт Stellar offer trades: доменные функции в [`clasp/DomainCore.js`](clasp/DomainCore.js) (`parseTradePrice`, `deriveLedgerFromTradeId`, `normalizeHorizonTradeRecord`, `mapOfferTrade`, `offerTradeDedupeKey`, `normalizeTradeIdKey`, `tradeIdLookupKeys`, `reconcileOfferTrades`, `buildLinkedTransferKey`, `planTradeCursorUpdates`, `shouldContinueTradePagination`, `resolveTradeTxHashes`, `acquireScriptLock`).
+2026-11-01 22:55:04 - Реализован GAS-слой в [`clasp/Резиденты Мабиз.js`](clasp/Резиденты%20Мабиз.js): `syncOfferTrades()`, `syncOfferTradesDryRun()`, `ensureOfferTradesSheet_()`, `getOfferTradeProps_()`, `resolveTradeTxHashes_()`, `fetchOfferTradesForAccount_()`, лист `OFFER_TRADES`, пункты меню 38 и 39, аудит в `DEBUG_LOG`, сброс курсоров `cursor_offer_trades_*`.
+2026-11-01 22:55:04 - Добавлены тесты [`__tests__/offerTrades.test.js`](__tests__/offerTrades.test.js); прогон `npx jest --config '{"testEnvironment":"node","testMatch":["**/__tests__/**/*.test.js"]}'` → 18 suites / 126 tests PASS; `node --check` для обоих JS — OK.
+2026-11-01 22:55:04 - Обновлена документация: [`docs/OFFER_TRADES_IMPORT.md`](docs/OFFER_TRADES_IMPORT.md), [`docs/USER_MENU.md`](docs/USER_MENU.md) (п.38–39), [`docs/ADMIN_SHEETS_AND_DATA_CONTRACT.md`](docs/ADMIN_SHEETS_AND_DATA_CONTRACT.md).
+2026-11-01 22:55:04 - Собрано on-chain evidence по публичному Horizon (read-only): офер `1849698980`, исполнения `276298037880643585-0` и `278237954349006849-0` по 250 EURMTL → 250 IMTabak; сверка офера 2450 + 250 + 250 = 2950.
 2026-04-22 14:25:07 - Завершено развитие resident-tracking scope поверх foundation-слоя: реализованы use-cases, bridges и foundation/RT changes для построения RT-витрин.
 2026-04-22 14:25:07 - Реализован orchestration entrypoint [`syncResidentTracking()`](clasp/Резиденты%20Мабиз.js:1505) как обязательный upstream-step для актуализации resident-tracking dataset и downstream views.
 2026-04-22 14:25:07 - Завершено построение RT snapshot/read-model builders: [`buildResidentTimeline()`](clasp/Резиденты%20Мабиз.js:1631), [`buildTokenFlows()`](clasp/Резиденты%20Мабиз.js:1737), [`buildIssuerStructure()`](clasp/Резиденты%20Мабиз.js:1832).
@@ -46,6 +53,8 @@
 
 ## Текущие задачи
 
+2026-11-01 22:55:04 - Ревью DRAFT PR #5 (https://github.com/t1p/stellar-scrypt/pull/5) и вердикт по нему — вход в change gate перед production.
+2026-11-01 22:55:04 - Dry-run в тестовой копии после `clasp push`: сверить `would_append`, `trades_calls`, `tx_hash_calls`, `lock` по контрольным opId `276298037880643585-0` и `278237954349006849-0`.
 2026-04-22 14:25:07 - Провести финальную runtime-верификацию полного resident-tracking flow на целевой таблице после интеграции account-metadata sync и обновленных RT builders.
 2026-04-22 14:25:07 - Углубить trade/swap аналитику поверх resident-tracking snapshots и token flow read-models.
 2026-04-22 14:25:07 - Подготовить richer UI/dashboard для downstream-потребления resident-tracking и account-metadata intelligence.
@@ -57,6 +66,10 @@
 
 ## Следующие шаги
 
+2026-11-01 22:55:04 - Пройти остаток change gate: боевой прогон импорта в тестовой копии → сверка с Horizon по контрольным opId → повторный прогон с `rows_appended=0` → GO владельца/Игоря → отдельный GO на `clasp push` в production.
+2026-11-01 22:55:04 - Отдельная задача: пересчёт учётного остатка `RESIDENTS` (строка 12 сейчас `2700 EURMTL`) на основе исполнений офера — со своим change gate.
+2026-11-01 22:55:04 - Отдельная задача: исправить предсуществующий дефект [`syncStellarTransfers()`](clasp/Резиденты%20Мабиз.js) — при `direction=OUT` в `TRANSFERS` пишется актив-получатель `IMTabak`, хотя экономически списан `EURMTL`.
+2026-11-01 22:55:04 - Покрыть GAS-обвязку юнит-тестами с моками `SpreadsheetApp`/`UrlFetchApp`/`PropertiesService`; добавить тест на `api_calls` по страницам `/trades`; устранить завышение `would_append` в dry-run при отсутствии листа (флаг `dedupe_unavailable`).
 2026-04-22 14:25:07 - Расширить RT pipeline дополнительными аналитическими срезами по trade/swap сценариям и enrichments на account metadata.
 2026-04-22 14:25:07 - Спроектировать и внедрить более выразительные dashboard/UI-слои над RT snapshots и downstream views.
 2026-04-22 14:25:07 - Закрыть финальный cycle runtime-проверки и operational acceptance для resident-tracking в продукционной таблице.
@@ -70,6 +83,8 @@
 
 ## Последние обновления
 
+2026-11-01 22:55:04 - В Memory Bank зафиксирован срез по задаче ClickUp `124hv5ux5pn`: отдельный лист `OFFER_TRADES`, правила дедупликации и определения направления, граница «остаток не пересчитывается», открытый change gate перед production.
+2026-11-01 22:55:04 - Фокус проекта смещён с общего resident-tracking контура на учёт исполнений офера IMTabak; production не менялся.
 2026-04-22 14:25:07 - В Memory Bank зафиксирован текущий source of truth: resident-tracking развивался поверх foundation/domain core, account-metadata интегрирован как intelligence layer, а commit `a8864c4` отражает последний интеграционный срез.
 2026-04-22 14:25:07 - Обновлен статус проекта по resident-tracking: завершены RT snapshots/read-models, menu integration и doc-sync; открыты runtime verification, richer UI и глубокая trade/swap аналитика.
 2026-03-31 23:08:56 - Добавлен администраторский контур документации (setup/config, data contract, runbook) для эксплуатации и сопровождения таблицы.

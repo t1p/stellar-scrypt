@@ -706,6 +706,59 @@
     return isNaN(parsed.getTime()) ? null : parsed;
   }
 
+  // Horizon отдаёт цену объектом {n, d}; в старых/тестовых данных встречается число или строка.
+  function parseTradePrice(value) {
+    if (value === undefined || value === null || value === '') return null;
+    if (typeof value === 'object') {
+      const n = Number(value.n);
+      const d = Number(value.d);
+      if (!isFinite(n) || !isFinite(d) || d === 0) return null;
+      return n / d;
+    }
+    const num = Number(value);
+    return isFinite(num) ? num : null;
+  }
+
+  // Horizon trade не содержит поля ledger: восстанавливаем из sequence-type id.
+  // id = <operation_id>-<trade_index>, operation_id = ledger * 2^32 + внутриледжерный номер.
+  function deriveLedgerFromTradeId(tradeId) {
+    const operationToken = String(tradeId || '').split('-')[0].trim();
+    const seq = Number(operationToken);
+    if (!isFinite(seq) || seq <= 0) return '';
+    return Math.floor(seq / 4294967296);
+  }
+
+  // Реальный ответ Horizon /accounts/{id}/trades: поля counter_*, ledger и tx_hash отсутствуют.
+  function normalizeHorizonTradeRecord(record) {
+    const row = record || {};
+    const assetOf = function (typeKey, codeKey, issuerKey) {
+      return row[typeKey]
+        ? { asset_type: row[typeKey], asset_code: row[codeKey], asset_issuer: row[issuerKey] }
+        : '';
+    };
+    const tradeId = String(row.id || row.paging_token || '').trim();
+    return {
+      id: String(row.id || '').trim(),
+      trade_id: tradeId,
+      paging_token: String(row.paging_token || tradeId).trim(),
+      ledger: deriveLedgerFromTradeId(tradeId),
+      ledger_close_time: row.ledger_close_time,
+      trade_type: row.trade_type || 'orderbook',
+      base_asset: assetOf('base_asset_type', 'base_asset_code', 'base_asset_issuer'),
+      base_amount: row.base_amount,
+      base_account: row.base_account,
+      base_is_seller: row.base_is_seller,
+      quote_asset: assetOf('counter_asset_type', 'counter_asset_code', 'counter_asset_issuer'),
+      quote_amount: row.counter_amount,
+      quote_account: row.counter_account,
+      base_offer_id: row.base_offer_id || row.offer_id,
+      counter_offer_id: row.counter_offer_id,
+      price: row.price,
+      tx_hash: row.tx_hash,
+      linked_transfer_key: row.linked_transfer_key
+    };
+  }
+
   function mapOfferTrade(record, options) {
     const row = record || {};
     const opts = options || {};
@@ -724,11 +777,16 @@
     const tradeId = String(row.trade_id || row.paging_token || '').trim();
     const baseAmount = Number(row.base_amount || 0);
     const quoteAmount = Number(row.quote_amount || 0);
+    const horizonPrice = parseTradePrice(row.price);
+    const ledgerValue = row.ledger === undefined || row.ledger === null || row.ledger === ''
+      ? deriveLedgerFromTradeId(tradeId)
+      : row.ledger;
 
     return {
       trade_id: tradeId,
+      id: String(row.id || '').trim(),
       paging_token: String(row.paging_token || tradeId).trim(),
-      ledger: row.ledger === undefined || row.ledger === null ? '' : String(row.ledger),
+      ledger: ledgerValue === '' ? '' : String(ledgerValue),
       closed_at: parseTradeTimestamp(row.ledger_close_time || row.ledger_close_at || row.closed_at),
       trade_type: String(row.trade_type || '').trim(),
       base_asset: base.code,
@@ -742,11 +800,15 @@
       fund_account: fundAccount,
       fund_side: fundSide,
       counterparty_account: counterpartyAccount,
+      // Правило направления см. docs/OFFER_TRADES_IMPORT.md, раздел «direction».
       direction: fundSide === 'base' ? 'OUT' : (fundSide === 'quote' ? 'IN' : ''),
       in_scope: Boolean(fundAccount),
-      price: baseAmount > 0 ? quoteAmount / baseAmount : 0,
+      price: horizonPrice === null ? (baseAmount > 0 ? quoteAmount / baseAmount : 0) : horizonPrice,
       base_offer_id: row.base_offer_id === undefined || row.base_offer_id === null ? '' : String(row.base_offer_id),
-      counter_offer_id: row.counter_offer_id === undefined || row.counter_offer_id === null ? '' : String(row.counter_offer_id)
+      counter_offer_id: row.counter_offer_id === undefined || row.counter_offer_id === null ? '' : String(row.counter_offer_id),
+      base_is_seller: row.base_is_seller === true ? true : (row.base_is_seller === false ? false : ''),
+      tx_hash: String(row.tx_hash || '').trim(),
+      linked_transfer_key: String(row.linked_transfer_key || '').trim()
     };
   }
 
@@ -754,14 +816,16 @@
     const trade = row || {};
     const tradeId = String(trade.trade_id || trade.paging_token || '').trim().toLowerCase();
     if (tradeId) return tradeId;
+    // Без id Horizon-трейда и без trade_id/paging_token строка не идентифицируема.
+    const horizonId = String(trade.id || '').trim().toLowerCase();
+    if (!horizonId) return '';
     const parts = [
-      trade.ledger, trade.base_account, trade.quote_account,
+      horizonId, trade.ledger, trade.base_account, trade.quote_account,
       trade.base_asset, trade.base_amount, trade.quote_asset, trade.quote_amount,
-      trade.base_offer_id, trade.counter_offer_id
+      trade.base_offer_id, trade.counter_offer_id, trade.base_is_seller, trade.tx_hash
     ].map(function (value) {
       return String(value === undefined || value === null ? '' : value).trim().toLowerCase();
     });
-    if (!parts.some(Boolean)) return '';
     return 'fallback:' + parts.join('|');
   }
 
@@ -775,10 +839,14 @@
 
     const fresh = [];
     const duplicates = [];
+    let rejectedNoKey = 0;
     (Array.isArray(incomingRows) ? incomingRows : []).forEach(function (row) {
       const mapped = row && (row.trade_id || row.paging_token) ? row : mapOfferTrade(row, opts);
       const key = offerTradeDedupeKey(mapped);
-      if (!key) return;
+      if (!key) {
+        rejectedNoKey++;
+        return;
+      }
       if (known[key]) {
         duplicates.push(mapped);
         return;
@@ -797,15 +865,83 @@
       fresh: fresh,
       duplicates: duplicates,
       appended: fresh.length,
-      skipped: duplicates.length
+      skipped: duplicates.length,
+      rejected_no_key: rejectedNoKey
     };
+  }
+
+  // opId операции из trade_id вида "<opId>-<tradeIndex>".
+  function offerTradeOperationId(tradeId) {
+    const token = String(tradeId || '').split('-')[0].trim();
+    return /^\d+$/.test(token) ? token : '';
+  }
+
+  // Связка trade ↔ строка TRANSFERS: "<tx_hash>:<opId>".
+  function buildLinkedTransferKey(txHash, tradeId) {
+    const hash = String(txHash || '').trim();
+    const opId = offerTradeOperationId(tradeId);
+    return hash && opId ? hash + ':' + opId : '';
+  }
+
+  // План записи: только строки в скоупе, с идентификатором.
+  function buildOfferTradeWritePlan(freshRows, options) {
+    const opts = options || {};
+    const rows = (Array.isArray(freshRows) ? freshRows : []).filter(function (row) {
+      return Boolean(row && row.in_scope !== false && row.trade_id);
+    });
+    const byAccount = {};
+    rows.forEach(function (row) {
+      const key = String(row.fund_account || 'UNKNOWN');
+      byAccount[key] = (byAccount[key] || 0) + 1;
+    });
+    return {
+      dryRun: Boolean(opts.dryRun),
+      rows: rows,
+      wouldAppend: rows.length,
+      byAccount: byAccount
+    };
+  }
+
+  // Курсоры сохраняем только по аккаунтам без ошибок и только после успешной записи строк.
+  function planTradeCursorUpdates(results) {
+    const updates = [];
+    const errors = [];
+    (Array.isArray(results) ? results : []).forEach(function (item) {
+      const result = item || {};
+      if (result.error) {
+        errors.push(String(result.fundKey || '') + ': ' + String(result.error));
+        return;
+      }
+      if (result.lastCursor && result.cursorKey) {
+        updates.push({ key: String(result.cursorKey), value: String(result.lastCursor) });
+      }
+    });
+    return { updates: updates, errors: errors };
+  }
+
+  function shouldContinueTradePagination(state) {
+    const input = state || {};
+    const pages = Number(input.pages || 0);
+    const maxPages = Number(input.maxPages || 0);
+    if (maxPages > 0 && pages >= maxPages) return false;
+    const deadline = Number(input.deadline || 0);
+    if (deadline > 0 && Number(input.now || 0) > deadline) return false;
+    return true;
   }
 
   const api = {
     parseTradeAsset,
+    parseTradePrice,
+    deriveLedgerFromTradeId,
+    normalizeHorizonTradeRecord,
+    offerTradeOperationId,
+    buildLinkedTransferKey,
     mapOfferTrade,
     offerTradeDedupeKey,
     reconcileOfferTrades,
+    buildOfferTradeWritePlan,
+    planTradeCursorUpdates,
+    shouldContinueTradePagination,
     normalizeAssetKey,
     normalizeTokenPart,
     parseTokenFilter,

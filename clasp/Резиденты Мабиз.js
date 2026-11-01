@@ -26,11 +26,14 @@ const SHEET_OFFER_TRADES = 'OFFER_TRADES';
 
 const OFFER_TRADES_HEADERS = [
   'trade_id', 'paging_token', 'ledger', 'closed_at', 'trade_type',
-  'base_asset', 'base_asset_issuer', 'base_amount', 'quote_asset', 'quote_asset_issuer', 'quote_amount',
+  'base_asset', 'base_asset_issuer', 'base_amount', 'base_is_seller', 'quote_asset', 'quote_asset_issuer', 'quote_amount',
   'base_account', 'quote_account', 'fund_account', 'fund_side', 'counterparty_account', 'direction',
-  'in_scope', 'price', 'base_offer_id', 'counter_offer_id', 'dedupe_key', 'synced_at'
+  'in_scope', 'price', 'base_offer_id', 'counter_offer_id', 'tx_hash', 'linked_transfer_key',
+  'dedupe_key', 'synced_at'
 ];
 const MAX_OFFER_TRADE_PAGES = 50;
+// Бюджет времени прогона: пагинация останавливается, курсор пишется по фактически обработанным страницам.
+const MAX_OFFER_TRADE_RUNTIME_MS = 4 * 60 * 1000;
 const SHEET_ACCOUNT_SIGNERS = 'ACCOUNT_SIGNERS';
 
 const SHEET_MAYMUN_EVENTS = 'MAYMUN_EVENTS';
@@ -151,6 +154,7 @@ function onOpen() {
     .addItem('MAYMUN: Process approved PRECHECK candidates', 'runMaymunAssetLayerProcessApprovedPrecheckCandidates')
     .addSeparator()
     .addItem('Обновить сделки по оферам (OFFER_TRADES)', 'syncOfferTrades')
+    .addItem('OFFER_TRADES: Dry-run', 'syncOfferTradesDryRun')
     .addSeparator()
     .addItem('Обновить Created данные аккаунтов', 'updateAccountCreationDetails')
     .addItem('Обновить метаданные аккаунтов', 'syncAccountsMeta')
@@ -168,7 +172,7 @@ function resetAllCursors() {
   const props = PropertiesService.getUserProperties();
   const keys = props.getKeys();
   for (const key of keys) {
-    if (key.startsWith('cursor_payments_')) props.deleteProperty(key);
+    if (key.startsWith('cursor_payments_') || key.startsWith('cursor_offer_trades_')) props.deleteProperty(key);
   }
   writeDebugLog({
     timestamp: new Date().toISOString(),
@@ -3531,7 +3535,8 @@ function writeDebugLog(logObj, overwriteLast = false) {
 
   for (const h of requiredHeaders) {
     if (headerMap[h]) {
-      logArray[headerMap[h] - 1] = logObj[h] || '';
+      // ?? а не ||: 0 в счётчиках (dedup_skipped: 0) должен попадать в лог.
+      logArray[headerMap[h] - 1] = logObj[h] ?? '';
     }
   }
 
@@ -6685,33 +6690,24 @@ function ensureOfferTradesSheet_() {
 }
 
 function normalizeHorizonTradeRecord_(rec) {
-  const row = rec || {};
-  const assetOf = (typeKey, codeKey, issuerKey) => (
-    row[typeKey] ? { asset_type: row[typeKey], asset_code: row[codeKey], asset_issuer: row[issuerKey] } : ''
-  );
-  return {
-    trade_id: String(row.id || row.paging_token || ''),
-    paging_token: String(row.paging_token || row.id || ''),
-    ledger: row.ledger,
-    ledger_close_time: row.ledger_close_time,
-    trade_type: row.trade_type || 'offer',
-    base_asset: assetOf('base_asset_type', 'base_asset_code', 'base_asset_issuer'),
-    base_amount: row.base_amount,
-    base_account: row.base_account,
-    quote_asset: assetOf('quote_asset_type', 'quote_asset_code', 'quote_asset_issuer'),
-    quote_amount: row.quote_amount,
-    quote_account: row.quote_account,
-    base_offer_id: row.base_offer_id || row.offer_id,
-    counter_offer_id: row.counter_offer_id || row.quote_offer_id
-  };
+  // Реальный формат Horizon: counter_*, без ledger, price = {n,d}. Разбор — в DomainCore.
+  return getOfferTradeCore_().normalizeHorizonTradeRecord(rec);
 }
 
-function fetchOfferTradesForAccount_(horizon, accountId, cursor) {
+function fetchOfferTradesForAccount_(horizon, accountId, cursor, deadline) {
+  const core = getOfferTradeCore_();
   const records = [];
   let next = `${horizon}/accounts/${accountId}/trades?order=asc&limit=200` + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
   let pages = 0;
   let lastCursor = '';
-  while (next && pages < MAX_OFFER_TRADE_PAGES) {
+  let truncated = false;
+  while (next) {
+    if (!core.shouldContinueTradePagination({
+      pages, maxPages: MAX_OFFER_TRADE_PAGES, deadline: deadline || 0, now: Date.now()
+    })) {
+      truncated = true; // лимит страниц или исчерпан бюджет времени прогона
+      break;
+    }
     const res = UrlFetchApp.fetch(next, { muteHttpExceptions: true });
     if (res.getResponseCode() !== 200) {
       throw new Error(`Horizon /trades ${res.getResponseCode()} для ${accountId}`);
@@ -6726,17 +6722,55 @@ function fetchOfferTradesForAccount_(horizon, accountId, cursor) {
     next = json._links && json._links.next && json._links.next.href;
     pages++;
   }
-  return { records, lastCursor };
+  return { records, lastCursor, pages, truncated };
 }
 
-function syncOfferTrades() {
+// Horizon trade не содержит tx_hash: один GET /operations/{opId} на opId, кэш на прогон.
+function resolveTradeTxHashes_(horizon, opIds) {
+  const cache = {};
+  for (const opId of opIds) {
+    if (!opId) continue;
+    if (Object.prototype.hasOwnProperty.call(cache, opId)) continue;
+    cache[opId] = '';
+    try {
+      const res = UrlFetchApp.fetch(`${horizon}/operations/${opId}`, { muteHttpExceptions: true });
+      if (res.getResponseCode() !== 200) continue;
+      const json = JSON.parse(res.getContentText());
+      cache[opId] = String(json.transaction_hash || '');
+    } catch (e) {
+      // недоступная операция → пустой tx_hash и пустой linked_transfer_key
+    }
+  }
+  return cache;
+}
+
+// Курсоры OFFER_TRADES — append-only журнал, поэтому script-scope, а не user-scope.
+function getOfferTradeProps_() {
+  try {
+    return PropertiesService.getScriptProperties();
+  } catch (e) {
+    writeDebugLog({
+      module: 'offer_trades',
+      timestamp: new Date().toISOString(),
+      stage: 'syncOfferTrades.props',
+      fund_key: 'ERROR',
+      details_json: `PropertiesService недоступен: ${e.message}`
+    });
+    return null;
+  }
+}
+
+function syncOfferTrades(options) {
+  const opts = options || {};
+  const dryRun = Boolean(opts.dryRun);
   const run_id = newRunId_();
   const startedAt = new Date().toISOString();
+  const deadline = Date.now() + MAX_OFFER_TRADE_RUNTIME_MS;
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const constSheet = ss.getSheetByName(SHEET_CONST);
   if (!constSheet) {
-    writeDebugLog({ run_id, module: 'offer_trades', timestamp: startedAt, stage: 'syncOfferTrades', fundKey: 'ERROR', details: 'CONST sheet not found' });
-    return;
+    writeDebugLog({ run_id, module: 'offer_trades', timestamp: startedAt, stage: 'syncOfferTrades', fund_key: 'ERROR', details_json: 'CONST sheet not found' });
+    return { run_id, dryRun, fetched: 0, appended: 0, duplicateSkipped: 0, rejectedNoKey: 0, linkedTransfers: 0, errors: ['CONST sheet not found'] };
   }
 
   const config = parseConstSheet(constSheet);
@@ -6745,56 +6779,100 @@ function syncOfferTrades() {
   const fundKeys = Object.keys(fundAccounts).filter(key => String(fundAccounts[key] || '').trim());
 
   const core = getOfferTradeCore_();
-  const sheet = ensureOfferTradesSheet_();
+  const existingSheet = ss.getSheetByName(SHEET_OFFER_TRADES);
+  const sheet = dryRun ? existingSheet : ensureOfferTradesSheet_();
   const syncStamp = startedAt;
-  const existingRows = readSheetRowsAsObjects_(sheet);
+  const existingRows = existingSheet ? readSheetRowsAsObjects_(existingSheet) : [];
 
   let totalFetched = 0;
-  let totalAppended = 0;
-  let totalDuplicates = 0;
   const errors = [];
   const pending = [];
+  const accountResults = [];
+  const opIds = [];
 
   for (const fundKey of fundKeys) {
     const accountId = String(fundAccounts[fundKey]).trim();
     const cursorKey = `cursor_offer_trades_${fundKey}`;
-    const props = PropertiesService.getUserProperties();
-    const cursor = props.getProperty(cursorKey) || '';
+    const props = getOfferTradeProps_();
+    const cursor = props ? (props.getProperty(cursorKey) || '') : '';
     try {
-      const result = fetchOfferTradesForAccount_(horizon, accountId, cursor);
+      const result = fetchOfferTradesForAccount_(horizon, accountId, cursor, deadline);
       totalFetched += result.records.length;
       for (const rec of result.records) {
-        const mapped = core.mapOfferTrade(normalizeHorizonTradeRecord_(rec), { fundAccounts });
-        pending.push(Object.assign({}, mapped, { synced_at: syncStamp }));
+        opIds.push(core.offerTradeOperationId(rec.id || rec.paging_token));
       }
-      if (result.lastCursor) props.setProperty(cursorKey, result.lastCursor);
+      accountResults.push({
+        fundKey, cursorKey, lastCursor: result.lastCursor,
+        truncated: result.truncated, error: '', records: result.records
+      });
     } catch (e) {
       errors.push(`${fundKey}: ${e.message}`);
+      accountResults.push({ fundKey, cursorKey, lastCursor: '', truncated: false, error: e.message, records: [] });
       writeDebugLog({
         run_id, module: 'offer_trades', timestamp: new Date().toISOString(),
-        stage: 'syncOfferTrades.fetch', fundKey: 'ERROR',
-        details: `${fundKey} ${e.message}`
+        stage: 'syncOfferTrades.fetch', fund_key: 'ERROR',
+        details_json: `${fundKey} ${e.message}`
       });
     }
   }
 
-  const reconciled = core.reconcileOfferTrades(existingRows, pending);
-  totalDuplicates = reconciled.skipped;
+  const txHashes = resolveTradeTxHashes_(horizon, opIds);
 
-  const inScopeRows = reconciled.fresh.filter(row => row.in_scope !== false && row.trade_id);
-  if (inScopeRows.length) {
-    const rows = inScopeRows.map(row => OFFER_TRADES_HEADERS.map(header => {
-      if (header === 'dedupe_key') return row.dedupe_key;
-      if (header === 'synced_at') return row.synced_at || syncStamp;
-      const value = row[header];
-      return value === undefined || value === null ? '' : value;
-    }));
-    sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
-    const closedAtIdx = OFFER_TRADES_HEADERS.indexOf('closed_at') + 1;
-    if (closedAtIdx > 0) {
-      sheet.getRange(2, closedAtIdx, Math.max(sheet.getLastRow() - 1, 1), 1).setNumberFormat('dd-mm-yyyy hh:mm:ss');
+  // Собираем записи из уже полученных результатов (fetch выполнен выше, повторных запросов нет).
+  for (const item of accountResults) {
+    if (item.error || !item.records) continue;
+    for (const rec of item.records) {
+      const mapped = core.mapOfferTrade(normalizeHorizonTradeRecord_(rec), { fundAccounts });
+      const txHash = txHashes[core.offerTradeOperationId(mapped.trade_id)] || '';
+      pending.push(Object.assign({}, mapped, {
+        tx_hash: txHash,
+        linked_transfer_key: core.buildLinkedTransferKey(txHash, mapped.trade_id),
+        synced_at: syncStamp
+      }));
     }
-    totalAppended = inScopeRows.length;
+  }
+
+  const reconciled = core.reconcileOfferTrades(existingRows, pending);
+  const plan = core.buildOfferTradeWritePlan(reconciled.fresh, { dryRun });
+  const rows = plan.rows.map(row => OFFER_TRADES_HEADERS.map(header => {
+    const value = row[header];
+    return value === undefined || value === null ? '' : value;
+  }));
+  const linkedTransfers = plan.rows.filter(row => row.linked_transfer_key).length;
+
+  let written = 0;
+  if (!dryRun && rows.length && sheet) {
+    try {
+      sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
+      const closedAtIdx = OFFER_TRADES_HEADERS.indexOf('closed_at') + 1;
+      if (closedAtIdx > 0) {
+        sheet.getRange(2, closedAtIdx, Math.max(sheet.getLastRow() - 1, 1), 1).setNumberFormat('dd-mm-yyyy hh:mm:ss');
+      }
+      written = rows.length;
+    } catch (e) {
+      errors.push(`write: ${e.message}`);
+      writeDebugLog({
+        run_id, module: 'offer_trades', timestamp: new Date().toISOString(),
+        stage: 'syncOfferTrades.write', fund_key: 'ERROR',
+        details_json: `setValues failed: ${e.message}`
+      });
+    }
+  }
+
+  // Курсоры пишем только после успешной записи строк и только по аккаунтам без ошибок.
+  if (!dryRun && written === rows.length) {
+    const cursorPlan = core.planTradeCursorUpdates(accountResults);
+    const props = getOfferTradeProps_();
+    if (props) {
+      for (const update of cursorPlan.updates) props.setProperty(update.key, update.value);
+    }
+  }
+  if (dryRun && accountResults.length) {
+    writeDebugLog({
+      run_id, module: 'offer_trades', timestamp: new Date().toISOString(),
+      stage: 'syncOfferTrades.cursor', fund_key: 'DRY_RUN',
+      details_json: '[DRY_RUN] Курсоры не записаны: ' + accountResults.map(item => `${item.cursorKey}=${item.lastCursor || '-'}`).join(', ')
+    });
   }
 
   writeDebugLog({
@@ -6802,16 +6880,46 @@ function syncOfferTrades() {
     module: 'offer_trades',
     timestamp: new Date().toISOString(),
     stage: 'syncOfferTrades',
-    fundKey: errors.length ? 'PARTIAL' : 'SUCCESS',
+    fund_key: errors.length ? 'PARTIAL' : 'SUCCESS',
     api_calls: fundKeys.length,
     rows_fetched: totalFetched,
-    rows_appended: totalAppended,
-    dedup_skipped: totalDuplicates,
+    rows_appended: written,
+    dedup_skipped: reconciled.skipped,
     errors: errors.join('; '),
-    details: `OFFER_TRADES sync: accounts=${fundKeys.length}, fetched=${totalFetched}, appended=${totalAppended}, duplicate_skipped=${totalDuplicates}, out_of_scope=${reconciled.fresh.length - totalAppended}`
+    details_json: `${dryRun ? '[DRY_RUN] ' : ''}OFFER_TRADES sync: accounts=${fundKeys.length}, fetched=${totalFetched}, ` +
+      `would_append=${rows.length}, appended=${written}, duplicate_skipped=${reconciled.skipped}, ` +
+      `rejected_no_key=${reconciled.rejected_no_key}, linked_transfers=${linkedTransfers}, ` +
+      `out_of_scope=${reconciled.fresh.length - rows.length}, ` +
+      `truncated_accounts=${accountResults.filter(item => item.truncated).length}`
   });
 
-  return { run_id, fetched: totalFetched, appended: totalAppended, duplicateSkipped: totalDuplicates, errors };
+  return {
+    run_id,
+    dryRun,
+    fetched: totalFetched,
+    wouldAppend: rows.length,
+    appended: written,
+    duplicateSkipped: reconciled.skipped,
+    rejectedNoKey: reconciled.rejected_no_key,
+    linkedTransfers,
+    byAccount: plan.byAccount,
+    rows,
+    errors
+  };
+}
+
+function syncOfferTradesDryRun() {
+  const result = syncOfferTrades({ dryRun: true });
+  Logger.log(JSON.stringify({
+    dryRun: result.dryRun,
+    wouldAppend: result.wouldAppend,
+    duplicateSkipped: result.duplicateSkipped,
+    rejectedNoKey: result.rejectedNoKey,
+    linkedTransfers: result.linkedTransfers,
+    byAccount: result.byAccount,
+    errors: result.errors
+  }));
+  return result;
 }
 
 function ping() {

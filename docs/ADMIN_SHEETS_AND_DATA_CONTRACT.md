@@ -279,22 +279,26 @@
 | Параметр | Значение |
 |----------|----------|
 | **Назначение** | Append-only журнал сделок по оферам (Horizon `/accounts/{id}/trades`) между фондовыми аккаунтами и контрагентами |
-| **Создаёт** | [`syncOfferTrades()`](clasp/Резиденты%20Мабиз.js) |
+| **Создаёт** | [`syncOfferTrades()`](clasp/Резиденты%20Мабиз.js), dry-run — [`syncOfferTradesDryRun()`](clasp/Резиденты%20Мабиз.js) (лист не создаёт) |
 | **Читает** | [`syncOfferTrades()`](clasp/Резиденты%20Мабиз.js) (для дедупликации) |
 | **Пишет** | [`syncOfferTrades()`](clasp/Резиденты%20Мабиз.js) |
 | **Режим** | Append-only (дедуп по `trade_id` = `paging_token`) |
 | **Ручное редактирование** | ❌ Нет |
-| **Курсоры** | `cursor_offer_trades_<fund_key>` в `PropertiesService.getUserProperties()` |
+| **Курсоры** | `cursor_offer_trades_<fund_key>` в `PropertiesService.getScriptProperties()` |
 
 Заголовки (`OFFER_TRADES_HEADERS`):
-`trade_id, paging_token, ledger, closed_at, trade_type, base_asset, base_asset_issuer, base_amount, quote_asset, quote_asset_issuer, quote_amount, base_account, quote_account, fund_account, fund_side, counterparty_account, direction, in_scope, price, base_offer_id, counter_offer_id, dedupe_key, synced_at`
+`trade_id, paging_token, ledger, closed_at, trade_type, base_asset, base_asset_issuer, base_amount, base_is_seller, quote_asset, quote_asset_issuer, quote_amount, base_account, quote_account, fund_account, fund_side, counterparty_account, direction, in_scope, price, base_offer_id, counter_offer_id, tx_hash, linked_transfer_key, dedupe_key, synced_at`
 
 Правила контракта:
 - Одна строка = одна сделка Horizon; `trade_id` уникален и служит ключом дедупликации.
-- `fund_side` = `base`/`quote`; `direction` = `OUT` при `fund_side=base`, `IN` при `fund_side=quote`.
+- Horizon отдаёт `counter_*`, без `ledger` и без `tx_hash`: `quote_*` берётся из `counter_*`, `ledger` вычисляется из `id` как `floor(opId / 2^32)`, `tx_hash` — через `GET /operations/{opId}`.
+- `price` берётся из объекта `price {n,d}`; fallback — `quote_amount / base_amount` (0 при нулевом `base_amount`).
+- `fund_side` = `base`/`quote`; `direction` = `OUT` при `fund_side=base`, `IN` при `fund_side=quote`. `base_is_seller` — справочная колонка и на `direction` не влияет.
 - `in_scope=false` ставится, когда ни один аккаунт из `CONST` не участвует в сделке; такие строки не пишутся в лист.
-- `price` = `quote_amount / base_amount` (0 при нулевом `base_amount`).
-- Частичные исполнения офера приходят отдельными `trade_id` и не схлопываются.
+- Без `trade_id`/`paging_token`/`id` строка не пишется, растёт `rejected_no_key`.
+- `linked_transfer_key` = `<tx_hash>:<opId>` — связка со строкой `TRANSFERS` того же события; пусто, если `tx_hash` недоступен.
+- Частичные исполнения офера приходят отдельными `trade_id` и не схлопываются; несколько trade одной транзакции не удваивают сумму.
+- Курсоры двигаются только после успешной записи строк и только по аккаунтам без ошибок.
 - `synced_at` фиксирует время записи строки.
 
 ### DEBUG_LOG

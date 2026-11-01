@@ -257,15 +257,20 @@
 - Обратная запись в очередь: `processing_status`, `processed_at`, `result_event_id`, `result_decision_id`, `error`.
 - DEBUG stages: `process_approved_candidates_start`, `process_candidate`, `process_candidate_duplicate`, `process_candidate_failed`, `process_approved_candidates_complete`.
 
-38. **Обновить сделки по оферам (OFFER_TRADES)** → [`syncOfferTrades()`](clasp/Резиденты%20Мабиз.js) (v1.0)
-- Что делает: забирает сделки по оферам из Horizon (`/accounts/{account}/trades?order=asc`) для всех фондовых аккаунтов из `CONST`, маппит их в нормализованные строки и добавляет в лист `OFFER_TRADES`.
-- Листы (читает/пишет): читает `CONST`, `OFFER_TRADES` (для дедупа), пишет `OFFER_TRADES`.
-- Дедуп: по `trade_id` (= `paging_token`); если `trade_id` отсутствует — по составному ключу `ledger|accounts|assets|amounts|offers`. Повторный запуск не создаёт дублей.
-- Курсоры: `cursor_offer_trades_<fund_key>` в `PropertiesService.getUserProperties()`; при сбросе курсоров история перечитывается, дубли отсекаются дедупом.
+38. **Обновить сделки по оферам (OFFER_TRADES)** → [`syncOfferTrades()`](clasp/Резиденты%20Мабиз.js) (v1.1)
+- Что делает: забирает сделки по оферам из Horizon (`/accounts/{account}/trades?order=asc`) для всех фондовых аккаунтов из `CONST`, нормализует реальный формат (`counter_*` → `quote_*`, `ledger` из `id`, `price` из `{n,d}`) и добавляет строки в лист `OFFER_TRADES`.
+- Листы (читает/пишет): читает `CONST`, `OFFER_TRADES` (для дедупа), пишет `OFFER_TRADES`; `tx_hash` добирается через `GET /operations/{opId}` (кэш на прогон).
+- Дедуп: по `trade_id`; если идентификатора нет вообще — строка не пишется, растёт метрика `rejected_no_key`.
+- Курсоры: `cursor_offer_trades_<fund_key>` в `PropertiesService.getScriptProperties()`; пишутся только после успешной записи строк и только по аккаунтам без ошибок.
 - Частичные исполнения: каждое исполнение офера приходит отдельным `trade_id` и пишется отдельной строкой (не схлопывается).
 - Область учёта: строки, где ни один фондовый аккаунт не участвует, помечаются `in_scope=false` и в лист не пишутся.
-- Ограничения: лимит `MAX_OFFER_TRADE_PAGES` (50) страниц Horizon на аккаунт за запуск; очень длинная история потребует нескольких запусков (курсор сохраняется).
-- Признак успеха: новые строки в `OFFER_TRADES` и запись этапа `syncOfferTrades` в `DEBUG_LOG` с метриками `rows_fetched`, `rows_appended`, `dedup_skipped`.
+- Ограничения: лимит `MAX_OFFER_TRADE_PAGES` (50) страниц Horizon на аккаунт и общий бюджет времени прогона `MAX_OFFER_TRADE_RUNTIME_MS` (4 минуты); длинная история потребует нескольких запусков.
+- Признак успеха: новые строки в `OFFER_TRADES` и запись этапа `syncOfferTrades` в `DEBUG_LOG` с метриками `rows_fetched`, `rows_appended`, `dedup_skipped`, `rejected_no_key`, `linked_transfers`, `truncated_accounts`.
+
+39. **OFFER_TRADES: Dry-run** → [`syncOfferTradesDryRun()`](clasp/Резиденты%20Мабиз.js) (v1.0)
+- Что делает: полный цикл чтения и нормализации без записи — не создаёт лист, не пишет строки, не двигает курсоры.
+- Возвращает в лог: `wouldAppend`, `duplicateSkipped`, `rejectedNoKey`, `linkedTransfers`, `byAccount`, `errors`; в `DEBUG_LOG` пишется строка `[DRY_RUN]`.
+- Назначение: проверка объёма и состава перед боевым запуском п.38.
 
 ## Рекомендуемый порядок запуска для новой таблицы
 

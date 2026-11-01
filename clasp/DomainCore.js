@@ -682,7 +682,130 @@
     return out;
   }
 
+  function parseTradeAsset(value) {
+    if (value && typeof value === 'object') {
+      const type = String(value.asset_type || '').trim().toLowerCase();
+      if (type === 'native') return { code: 'XLM', issuer: '' };
+      return {
+        code: String(value.asset_code || '').trim(),
+        issuer: String(value.asset_issuer || '').trim()
+      };
+    }
+    const raw = String(value || '').trim();
+    if (!raw) return { code: '', issuer: '' };
+    const upper = raw.toUpperCase();
+    if (upper === 'XLM' || upper === 'NATIVE') return { code: 'XLM', issuer: '' };
+    const parts = raw.split(':');
+    return { code: String(parts[0] || '').trim(), issuer: String(parts[1] || '').trim() };
+  }
+
+  function parseTradeTimestamp(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return null;
+    const parsed = new Date(raw);
+    return isNaN(parsed.getTime()) ? null : parsed;
+  }
+
+  function mapOfferTrade(record, options) {
+    const row = record || {};
+    const opts = options || {};
+    const fundAccounts = Object.keys(opts.fundAccounts || {})
+      .map(function (key) { return String(opts.fundAccounts[key] || '').trim(); })
+      .filter(Boolean);
+    const base = parseTradeAsset(row.base_asset);
+    const quote = parseTradeAsset(row.quote_asset);
+    const baseAccount = String(row.base_account || '').trim();
+    const quoteAccount = String(row.quote_account || '').trim();
+    const baseIsFund = fundAccounts.indexOf(baseAccount) >= 0;
+    const quoteIsFund = fundAccounts.indexOf(quoteAccount) >= 0;
+    const fundAccount = baseIsFund ? baseAccount : (quoteIsFund ? quoteAccount : '');
+    const fundSide = !fundAccount ? '' : (fundAccount === baseAccount ? 'base' : 'quote');
+    const counterpartyAccount = fundSide === 'base' ? quoteAccount : (fundSide === 'quote' ? baseAccount : '');
+    const tradeId = String(row.trade_id || row.paging_token || '').trim();
+    const baseAmount = Number(row.base_amount || 0);
+    const quoteAmount = Number(row.quote_amount || 0);
+
+    return {
+      trade_id: tradeId,
+      paging_token: String(row.paging_token || tradeId).trim(),
+      ledger: row.ledger === undefined || row.ledger === null ? '' : String(row.ledger),
+      closed_at: parseTradeTimestamp(row.ledger_close_time || row.ledger_close_at || row.closed_at),
+      trade_type: String(row.trade_type || '').trim(),
+      base_asset: base.code,
+      base_asset_issuer: base.issuer,
+      base_amount: baseAmount,
+      quote_asset: quote.code,
+      quote_asset_issuer: quote.issuer,
+      quote_amount: quoteAmount,
+      base_account: baseAccount,
+      quote_account: quoteAccount,
+      fund_account: fundAccount,
+      fund_side: fundSide,
+      counterparty_account: counterpartyAccount,
+      direction: fundSide === 'base' ? 'OUT' : (fundSide === 'quote' ? 'IN' : ''),
+      in_scope: Boolean(fundAccount),
+      price: baseAmount > 0 ? quoteAmount / baseAmount : 0,
+      base_offer_id: row.base_offer_id === undefined || row.base_offer_id === null ? '' : String(row.base_offer_id),
+      counter_offer_id: row.counter_offer_id === undefined || row.counter_offer_id === null ? '' : String(row.counter_offer_id)
+    };
+  }
+
+  function offerTradeDedupeKey(row) {
+    const trade = row || {};
+    const tradeId = String(trade.trade_id || trade.paging_token || '').trim().toLowerCase();
+    if (tradeId) return tradeId;
+    const parts = [
+      trade.ledger, trade.base_account, trade.quote_account,
+      trade.base_asset, trade.base_amount, trade.quote_asset, trade.quote_amount,
+      trade.base_offer_id, trade.counter_offer_id
+    ].map(function (value) {
+      return String(value === undefined || value === null ? '' : value).trim().toLowerCase();
+    });
+    if (!parts.some(Boolean)) return '';
+    return 'fallback:' + parts.join('|');
+  }
+
+  function reconcileOfferTrades(existingRows, incomingRows, options) {
+    const opts = options || {};
+    const known = {};
+    (Array.isArray(existingRows) ? existingRows : []).forEach(function (row) {
+      const key = typeof row === 'string' ? String(row).trim().toLowerCase() : offerTradeDedupeKey(row);
+      if (key) known[key] = true;
+    });
+
+    const fresh = [];
+    const duplicates = [];
+    (Array.isArray(incomingRows) ? incomingRows : []).forEach(function (row) {
+      const mapped = row && (row.trade_id || row.paging_token) ? row : mapOfferTrade(row, opts);
+      const key = offerTradeDedupeKey(mapped);
+      if (!key) return;
+      if (known[key]) {
+        duplicates.push(mapped);
+        return;
+      }
+      known[key] = true;
+      fresh.push(Object.assign({}, mapped, { dedupe_key: key }));
+    });
+
+    fresh.sort(function (a, b) {
+      const ledgerDiff = Number(a.ledger || 0) - Number(b.ledger || 0);
+      if (ledgerDiff !== 0) return ledgerDiff;
+      return String(a.trade_id || '').localeCompare(String(b.trade_id || ''));
+    });
+
+    return {
+      fresh: fresh,
+      duplicates: duplicates,
+      appended: fresh.length,
+      skipped: duplicates.length
+    };
+  }
+
   const api = {
+    parseTradeAsset,
+    mapOfferTrade,
+    offerTradeDedupeKey,
+    reconcileOfferTrades,
     normalizeAssetKey,
     normalizeTokenPart,
     parseTokenFilter,

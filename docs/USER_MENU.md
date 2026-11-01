@@ -257,6 +257,16 @@
 - Обратная запись в очередь: `processing_status`, `processed_at`, `result_event_id`, `result_decision_id`, `error`.
 - DEBUG stages: `process_approved_candidates_start`, `process_candidate`, `process_candidate_duplicate`, `process_candidate_failed`, `process_approved_candidates_complete`.
 
+38. **Обновить сделки по оферам (OFFER_TRADES)** → [`syncOfferTrades()`](clasp/Резиденты%20Мабиз.js) (v1.0)
+- Что делает: забирает сделки по оферам из Horizon (`/accounts/{account}/trades?order=asc`) для всех фондовых аккаунтов из `CONST`, маппит их в нормализованные строки и добавляет в лист `OFFER_TRADES`.
+- Листы (читает/пишет): читает `CONST`, `OFFER_TRADES` (для дедупа), пишет `OFFER_TRADES`.
+- Дедуп: по `trade_id` (= `paging_token`); если `trade_id` отсутствует — по составному ключу `ledger|accounts|assets|amounts|offers`. Повторный запуск не создаёт дублей.
+- Курсоры: `cursor_offer_trades_<fund_key>` в `PropertiesService.getUserProperties()`; при сбросе курсоров история перечитывается, дубли отсекаются дедупом.
+- Частичные исполнения: каждое исполнение офера приходит отдельным `trade_id` и пишется отдельной строкой (не схлопывается).
+- Область учёта: строки, где ни один фондовый аккаунт не участвует, помечаются `in_scope=false` и в лист не пишутся.
+- Ограничения: лимит `MAX_OFFER_TRADE_PAGES` (50) страниц Horizon на аккаунт за запуск; очень длинная история потребует нескольких запусков (курсор сохраняется).
+- Признак успеха: новые строки в `OFFER_TRADES` и запись этапа `syncOfferTrades` в `DEBUG_LOG` с метриками `rows_fetched`, `rows_appended`, `dedup_skipped`.
+
 ## Рекомендуемый порядок запуска для новой таблицы
 
 1. Подготовить `CONST` (ключи Stellar/ClickUp) по требованиям из [`README.md`](README.md:23).

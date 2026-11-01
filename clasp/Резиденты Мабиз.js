@@ -22,6 +22,15 @@ const SHEET_RESIDENT_TIMELINE = 'RESIDENT_TIMELINE';
 const SHEET_TOKEN_FLOWS = 'TOKEN_FLOWS';
 const SHEET_ISSUER_STRUCTURE = 'ISSUER_STRUCTURE';
 const SHEET_ACCOUNTS_META = 'ACCOUNTS_META';
+const SHEET_OFFER_TRADES = 'OFFER_TRADES';
+
+const OFFER_TRADES_HEADERS = [
+  'trade_id', 'paging_token', 'ledger', 'closed_at', 'trade_type',
+  'base_asset', 'base_asset_issuer', 'base_amount', 'quote_asset', 'quote_asset_issuer', 'quote_amount',
+  'base_account', 'quote_account', 'fund_account', 'fund_side', 'counterparty_account', 'direction',
+  'in_scope', 'price', 'base_offer_id', 'counter_offer_id', 'dedupe_key', 'synced_at'
+];
+const MAX_OFFER_TRADE_PAGES = 50;
 const SHEET_ACCOUNT_SIGNERS = 'ACCOUNT_SIGNERS';
 
 const SHEET_MAYMUN_EVENTS = 'MAYMUN_EVENTS';
@@ -140,6 +149,8 @@ function onOpen() {
     .addItem('MAYMUN: Create runway snapshot', 'runMaymunAssetLayerCreateRunwaySnapshot')
     .addItem('MAYMUN: Precheck unprocessed TRANSFERS', 'runMaymunAssetLayerPrecheckUnprocessedTransfers')
     .addItem('MAYMUN: Process approved PRECHECK candidates', 'runMaymunAssetLayerProcessApprovedPrecheckCandidates')
+    .addSeparator()
+    .addItem('Обновить сделки по оферам (OFFER_TRADES)', 'syncOfferTrades')
     .addSeparator()
     .addItem('Обновить Created данные аккаунтов', 'updateAccountCreationDetails')
     .addItem('Обновить метаданные аккаунтов', 'syncAccountsMeta')
@@ -6642,6 +6653,165 @@ MAYMUN_ALLOCATIONS ${delta[SHEET_MAYMUN_ALLOCATIONS]?.delta >= 0 ? '+' : ''}${de
     ui.alert(errorMsg);
     return { runId, success: false, error: errorMsg };
   }
+}
+
+// ========== OFFER_TRADES: сделки по оферам (offer exchange) ==========
+
+function getOfferTradeCore_() {
+  const core = getDomainCore_();
+  if (typeof core.mapOfferTrade !== 'function' || typeof core.reconcileOfferTrades !== 'function') {
+    throw new Error('DomainCore.mapOfferTrade/reconcileOfferTrades недоступны');
+  }
+  return core;
+}
+
+function ensureOfferTradesSheet_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(SHEET_OFFER_TRADES);
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_OFFER_TRADES);
+    sheet.appendRow(OFFER_TRADES_HEADERS);
+    return sheet;
+  }
+  const lastColumn = sheet.getLastColumn();
+  const headers = lastColumn > 0
+    ? sheet.getRange(1, 1, 1, lastColumn).getValues()[0].map(h => String(h || '').trim())
+    : [];
+  const missing = OFFER_TRADES_HEADERS.filter(h => headers.indexOf(h) === -1);
+  if (missing.length) {
+    sheet.getRange(1, headers.length + 1, 1, missing.length).setValues([missing]);
+  }
+  return sheet;
+}
+
+function normalizeHorizonTradeRecord_(rec) {
+  const row = rec || {};
+  const assetOf = (typeKey, codeKey, issuerKey) => (
+    row[typeKey] ? { asset_type: row[typeKey], asset_code: row[codeKey], asset_issuer: row[issuerKey] } : ''
+  );
+  return {
+    trade_id: String(row.id || row.paging_token || ''),
+    paging_token: String(row.paging_token || row.id || ''),
+    ledger: row.ledger,
+    ledger_close_time: row.ledger_close_time,
+    trade_type: row.trade_type || 'offer',
+    base_asset: assetOf('base_asset_type', 'base_asset_code', 'base_asset_issuer'),
+    base_amount: row.base_amount,
+    base_account: row.base_account,
+    quote_asset: assetOf('quote_asset_type', 'quote_asset_code', 'quote_asset_issuer'),
+    quote_amount: row.quote_amount,
+    quote_account: row.quote_account,
+    base_offer_id: row.base_offer_id || row.offer_id,
+    counter_offer_id: row.counter_offer_id || row.quote_offer_id
+  };
+}
+
+function fetchOfferTradesForAccount_(horizon, accountId, cursor) {
+  const records = [];
+  let next = `${horizon}/accounts/${accountId}/trades?order=asc&limit=200` + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
+  let pages = 0;
+  let lastCursor = '';
+  while (next && pages < MAX_OFFER_TRADE_PAGES) {
+    const res = UrlFetchApp.fetch(next, { muteHttpExceptions: true });
+    if (res.getResponseCode() !== 200) {
+      throw new Error(`Horizon /trades ${res.getResponseCode()} для ${accountId}`);
+    }
+    const json = JSON.parse(res.getContentText());
+    const batch = (json._embedded && json._embedded.records) || [];
+    if (!batch.length) break;
+    for (const rec of batch) {
+      records.push(rec);
+      lastCursor = String(rec.paging_token || rec.id || '');
+    }
+    next = json._links && json._links.next && json._links.next.href;
+    pages++;
+  }
+  return { records, lastCursor };
+}
+
+function syncOfferTrades() {
+  const run_id = newRunId_();
+  const startedAt = new Date().toISOString();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const constSheet = ss.getSheetByName(SHEET_CONST);
+  if (!constSheet) {
+    writeDebugLog({ run_id, module: 'offer_trades', timestamp: startedAt, stage: 'syncOfferTrades', fundKey: 'ERROR', details: 'CONST sheet not found' });
+    return;
+  }
+
+  const config = parseConstSheet(constSheet);
+  const horizon = String(config.HORIZON_URL || DEFAULT_HORIZON_URL).replace(/\/+$/, '');
+  const fundAccounts = config.fundAccounts || {};
+  const fundKeys = Object.keys(fundAccounts).filter(key => String(fundAccounts[key] || '').trim());
+
+  const core = getOfferTradeCore_();
+  const sheet = ensureOfferTradesSheet_();
+  const syncStamp = startedAt;
+  const existingRows = readSheetRowsAsObjects_(sheet);
+
+  let totalFetched = 0;
+  let totalAppended = 0;
+  let totalDuplicates = 0;
+  const errors = [];
+  const pending = [];
+
+  for (const fundKey of fundKeys) {
+    const accountId = String(fundAccounts[fundKey]).trim();
+    const cursorKey = `cursor_offer_trades_${fundKey}`;
+    const props = PropertiesService.getUserProperties();
+    const cursor = props.getProperty(cursorKey) || '';
+    try {
+      const result = fetchOfferTradesForAccount_(horizon, accountId, cursor);
+      totalFetched += result.records.length;
+      for (const rec of result.records) {
+        const mapped = core.mapOfferTrade(normalizeHorizonTradeRecord_(rec), { fundAccounts });
+        pending.push(Object.assign({}, mapped, { synced_at: syncStamp }));
+      }
+      if (result.lastCursor) props.setProperty(cursorKey, result.lastCursor);
+    } catch (e) {
+      errors.push(`${fundKey}: ${e.message}`);
+      writeDebugLog({
+        run_id, module: 'offer_trades', timestamp: new Date().toISOString(),
+        stage: 'syncOfferTrades.fetch', fundKey: 'ERROR',
+        details: `${fundKey} ${e.message}`
+      });
+    }
+  }
+
+  const reconciled = core.reconcileOfferTrades(existingRows, pending);
+  totalDuplicates = reconciled.skipped;
+
+  const inScopeRows = reconciled.fresh.filter(row => row.in_scope !== false && row.trade_id);
+  if (inScopeRows.length) {
+    const rows = inScopeRows.map(row => OFFER_TRADES_HEADERS.map(header => {
+      if (header === 'dedupe_key') return row.dedupe_key;
+      if (header === 'synced_at') return row.synced_at || syncStamp;
+      const value = row[header];
+      return value === undefined || value === null ? '' : value;
+    }));
+    sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
+    const closedAtIdx = OFFER_TRADES_HEADERS.indexOf('closed_at') + 1;
+    if (closedAtIdx > 0) {
+      sheet.getRange(2, closedAtIdx, Math.max(sheet.getLastRow() - 1, 1), 1).setNumberFormat('dd-mm-yyyy hh:mm:ss');
+    }
+    totalAppended = inScopeRows.length;
+  }
+
+  writeDebugLog({
+    run_id,
+    module: 'offer_trades',
+    timestamp: new Date().toISOString(),
+    stage: 'syncOfferTrades',
+    fundKey: errors.length ? 'PARTIAL' : 'SUCCESS',
+    api_calls: fundKeys.length,
+    rows_fetched: totalFetched,
+    rows_appended: totalAppended,
+    dedup_skipped: totalDuplicates,
+    errors: errors.join('; '),
+    details: `OFFER_TRADES sync: accounts=${fundKeys.length}, fetched=${totalFetched}, appended=${totalAppended}, duplicate_skipped=${totalDuplicates}, out_of_scope=${reconciled.fresh.length - totalAppended}`
+  });
+
+  return { run_id, fetched: totalFetched, appended: totalAppended, duplicateSkipped: totalDuplicates, errors };
 }
 
 function ping() {

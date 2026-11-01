@@ -274,6 +274,29 @@
 | **Режим** | Snapshot overwrite |
 | **Ручное редактирование** | ❌ Нет |
 
+### OFFER_TRADES
+
+| Параметр | Значение |
+|----------|----------|
+| **Назначение** | Append-only журнал сделок по оферам (Horizon `/accounts/{id}/trades`) между фондовыми аккаунтами и контрагентами |
+| **Создаёт** | [`syncOfferTrades()`](clasp/Резиденты%20Мабиз.js) |
+| **Читает** | [`syncOfferTrades()`](clasp/Резиденты%20Мабиз.js) (для дедупликации) |
+| **Пишет** | [`syncOfferTrades()`](clasp/Резиденты%20Мабиз.js) |
+| **Режим** | Append-only (дедуп по `trade_id` = `paging_token`) |
+| **Ручное редактирование** | ❌ Нет |
+| **Курсоры** | `cursor_offer_trades_<fund_key>` в `PropertiesService.getUserProperties()` |
+
+Заголовки (`OFFER_TRADES_HEADERS`):
+`trade_id, paging_token, ledger, closed_at, trade_type, base_asset, base_asset_issuer, base_amount, quote_asset, quote_asset_issuer, quote_amount, base_account, quote_account, fund_account, fund_side, counterparty_account, direction, in_scope, price, base_offer_id, counter_offer_id, dedupe_key, synced_at`
+
+Правила контракта:
+- Одна строка = одна сделка Horizon; `trade_id` уникален и служит ключом дедупликации.
+- `fund_side` = `base`/`quote`; `direction` = `OUT` при `fund_side=base`, `IN` при `fund_side=quote`.
+- `in_scope=false` ставится, когда ни один аккаунт из `CONST` не участвует в сделке; такие строки не пишутся в лист.
+- `price` = `quote_amount / base_amount` (0 при нулевом `base_amount`).
+- Частичные исполнения офера приходят отдельными `trade_id` и не схлопываются.
+- `synced_at` фиксирует время записи строки.
+
 ### DEBUG_LOG
 
 | Параметр | Значение |
@@ -307,6 +330,7 @@
 | RESIDENT_TIMELINE | — | [`buildResidentTimeline()`](clasp/Резиденты%20Мабиз.js:1630) | Перезаписывается полностью |
 | TOKEN_FLOWS | — | [`buildTokenFlows()`](clasp/Резиденты%20Мабиз.js:1750) | Перезаписывается полностью |
 | ISSUER_STRUCTURE | — | [`buildIssuerStructure()`](clasp/Резиденты%20Мабиз.js:1865) | Перезаписывается полностью |
+| OFFER_TRADES | [`syncOfferTrades()`](clasp/Резиденты%20Мабиз.js) | [`syncOfferTrades()`](clasp/Резиденты%20Мабиз.js) | Удаление колонки `trade_id` → дубли; сброс курсоров → повторная выборка всей истории |
 | DEBUG_LOG | Администратор | Все функции | Нет критичных рисков |
 
 ## Явная зависимость RT flow

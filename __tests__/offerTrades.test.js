@@ -10,6 +10,7 @@ const {
   reconcileOfferTrades,
   buildOfferTradeWritePlan,
   planTradeCursorUpdates,
+  resolveTradeTxHashes,
   shouldContinueTradePagination
 } = require('../clasp/DomainCore');
 
@@ -20,8 +21,9 @@ const IMTABAK_ISSUER = 'GAKGV47MQO7IXHWJDWYBJY6T2O65SXHIFFE5M5OIAT46OTAUTIUZGTBK
 const OTHER = 'GCEZWKCA5VLDNRLN3RPRJMRZOX3Z6G5CHCGSNFHEYVXM3XOJMDS674JZ';
 const fundAccounts = { MABIZ_FUND: FUND };
 
-const TX_A = '12010b56a1c5fe7d2f8dd0d0a2b7f9ba1a2f5b8d3cd0e3f5c7b9a26f7d0e4c1a';
-const TX_B = 'a00bebb5f5d7b1e9c3a2d4f6b8e0c2a4d6f8b0e2c4a6d8f0b2e4c6a8d0f2b4e6';
+// Фактические transaction_hash из Horizon для opId 276298037880643585 и 278237954349006849.
+const TX_A = '12010b56241345ccf2f25c15b20db58fe6ee41abc975cf9d4acc7a598ca2f1b9';
+const TX_B = 'a00bebb5bca07bc66a0a0a11d47809a91c14ebb0688e511e4b170fa4f574dbae';
 
 // Реальный ответ GET /accounts/{id}/trades: counter_*, без ledger и tx_hash, price = {n,d}.
 const horizonTradeA = {
@@ -32,13 +34,13 @@ const horizonTradeA = {
   base_offer_id: '4887984056308031489',
   base_account: FUND,
   base_amount: '250.0000000',
-  base_asset_type: 'credit_alphanum4',
+  base_asset_type: 'credit_alphanum12',
   base_asset_code: 'EURMTL',
   base_asset_issuer: EURMTL_ISSUER,
   counter_offer_id: '1849698980',
   counter_account: COUNTER,
   counter_amount: '250.0000000',
-  counter_asset_type: 'credit_alphanum4',
+  counter_asset_type: 'credit_alphanum12',
   counter_asset_code: 'IMTabak',
   counter_asset_issuer: IMTABAK_ISSUER,
   base_is_seller: false,
@@ -321,5 +323,89 @@ describe('shouldContinueTradePagination', () => {
     expect(shouldContinueTradePagination({ pages: 3, maxPages: 3, deadline: 0, now: 0 })).toBe(false);
     expect(shouldContinueTradePagination({ pages: 1, maxPages: 3, deadline: 1000, now: 1500 })).toBe(false);
     expect(shouldContinueTradePagination({})).toBe(true);
+  });
+});
+
+describe('resolveTradeTxHashes', () => {
+  const okFetch = () => ({
+    status: 200,
+    body: JSON.stringify({ transaction_hash: TX_A })
+  });
+
+  it('caches per opId and counts real calls', () => {
+    let calls = 0;
+    const result = resolveTradeTxHashes(
+      ['276298037880643585', '276298037880643585', '278237954349006849'],
+      () => { calls++; return okFetch(); }
+    );
+
+    expect(calls).toBe(2);
+    expect(result.apiCalls).toBe(2);
+    expect(result.cache['276298037880643585']).toBe(TX_A);
+    expect(result.skipped).toBe(0);
+    expect(result.failed).toBe(0);
+  });
+
+  it('keeps empty hash when /operations/{opId} is not 200', () => {
+    const result = resolveTradeTxHashes(
+      ['276298037880643585'],
+      () => ({ status: 404, body: '{"type":"not_found"}' })
+    );
+
+    expect(result.cache['276298037880643585']).toBe('');
+    expect(result.apiCalls).toBe(1);
+    expect(result.failed).toBe(1);
+  });
+
+  it('still writes the row with empty linked_transfer_key when operation is unavailable', () => {
+    const resolution = resolveTradeTxHashes(
+      ['276298037880643585'],
+      () => ({ status: 500, body: '' })
+    );
+    const row = Object.assign(mapOfferTrade(mapA(), { fundAccounts }), {
+      tx_hash: resolution.cache['276298037880643585'] || '',
+      linked_transfer_key: buildLinkedTransferKey(resolution.cache['276298037880643585'] || '', '276298037880643585-0')
+    });
+    const plan = buildOfferTradeWritePlan([row], { dryRun: true });
+
+    expect(row.tx_hash).toBe('');
+    expect(row.linked_transfer_key).toBe('');
+    expect(plan.rows).toHaveLength(1);
+    expect(resolution.failed).toBe(1);
+  });
+
+  it('keeps empty hash when fetch throws', () => {
+    const result = resolveTradeTxHashes(['276298037880643585'], () => { throw new Error('network'); });
+
+    expect(result.cache['276298037880643585']).toBe('');
+    expect(result.failed).toBe(1);
+  });
+
+  it('stops resolving when the run budget is exhausted', () => {
+    let calls = 0;
+    const result = resolveTradeTxHashes(
+      ['276298037880643585', '278237954349006849'],
+      () => { calls++; return okFetch(); },
+      { deadline: 1000, now: () => 1500 }
+    );
+
+    expect(calls).toBe(0);
+    expect(result.apiCalls).toBe(0);
+    expect(result.skipped).toBe(2);
+    expect(result.cache).toEqual({});
+  });
+
+  it('stops midway when the deadline hits', () => {
+    let clock = 0;
+    const result = resolveTradeTxHashes(
+      ['276298037880643585', '278237954349006849'],
+      () => { clock = 5000; return okFetch(); },
+      { deadline: 1000, now: () => clock }
+    );
+
+    expect(result.apiCalls).toBe(1);
+    expect(result.skipped).toBe(1);
+    expect(result.cache['276298037880643585']).toBe(TX_A);
+    expect(result.cache['278237954349006849']).toBeUndefined();
   });
 });

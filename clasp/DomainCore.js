@@ -919,6 +919,42 @@
     return { updates: updates, errors: errors };
   }
 
+  // Резолв tx_hash по opId: один вызов на уникальный opId, с бюджетом времени прогона.
+  // Неразрешённые opId остаются с пустым хешем — строка всё равно пишется.
+  function resolveTradeTxHashes(opIds, fetchOperation, options) {
+    const opts = options || {};
+    const deadline = Number(opts.deadline || 0);
+    const now = typeof opts.now === 'function' ? opts.now : Date.now;
+    const cache = {};
+    let apiCalls = 0;
+    let failed = 0;
+    let skipped = 0;
+    (Array.isArray(opIds) ? opIds : []).forEach(function (rawOpId) {
+      const opId = String(rawOpId || '').trim();
+      if (!opId) return;
+      if (Object.prototype.hasOwnProperty.call(cache, opId)) return;
+      if (deadline > 0 && Number(now()) > deadline) {
+        skipped++;
+        return;
+      }
+      cache[opId] = '';
+      apiCalls++;
+      try {
+        const response = fetchOperation(opId) || {};
+        if (Number(response.status) !== 200) {
+          failed++;
+          return;
+        }
+        const json = JSON.parse(String(response.body || '{}'));
+        cache[opId] = String(json.transaction_hash || '').trim();
+      } catch (e) {
+        // недоступная операция → пустой tx_hash и пустой linked_transfer_key
+        failed++;
+      }
+    });
+    return { cache: cache, apiCalls: apiCalls, failed: failed, skipped: skipped };
+  }
+
   function shouldContinueTradePagination(state) {
     const input = state || {};
     const pages = Number(input.pages || 0);
@@ -941,6 +977,7 @@
     reconcileOfferTrades,
     buildOfferTradeWritePlan,
     planTradeCursorUpdates,
+    resolveTradeTxHashes,
     shouldContinueTradePagination,
     normalizeAssetKey,
     normalizeTokenPart,

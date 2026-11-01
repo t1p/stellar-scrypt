@@ -169,16 +169,28 @@ function syncAllStellar() {
 
 // ========== Сброс курсоров ==========
 function resetAllCursors() {
-  const props = PropertiesService.getUserProperties();
-  const keys = props.getKeys();
-  for (const key of keys) {
-    if (key.startsWith('cursor_payments_') || key.startsWith('cursor_offer_trades_')) props.deleteProperty(key);
+  // cursor_payments_* живут в user-scope, cursor_offer_trades_* — в script-scope.
+  const userProps = PropertiesService.getUserProperties();
+  let paymentsReset = 0;
+  for (const key of userProps.getKeys()) {
+    if (key.startsWith('cursor_payments_')) {
+      userProps.deleteProperty(key);
+      paymentsReset++;
+    }
+  }
+  const scriptProps = PropertiesService.getScriptProperties();
+  let tradesReset = 0;
+  for (const key of scriptProps.getKeys()) {
+    if (key.startsWith('cursor_offer_trades_')) {
+      scriptProps.deleteProperty(key);
+      tradesReset++;
+    }
   }
   writeDebugLog({
     timestamp: new Date().toISOString(),
     stage: 'resetAllCursors',
-    fundKey: 'ALL',
-    details: 'Все курсоры сброшены.'
+    fund_key: 'ALL',
+    details_json: `Все курсоры сброшены: payments=${paymentsReset}, offer_trades=${tradesReset}.`
   });
 }
 
@@ -6678,15 +6690,18 @@ function ensureOfferTradesSheet_() {
     sheet.appendRow(OFFER_TRADES_HEADERS);
     return sheet;
   }
-  const lastColumn = sheet.getLastColumn();
-  const headers = lastColumn > 0
-    ? sheet.getRange(1, 1, 1, lastColumn).getValues()[0].map(h => String(h || '').trim())
-    : [];
+  const headers = getOfferTradesHeaders_(sheet);
   const missing = OFFER_TRADES_HEADERS.filter(h => headers.indexOf(h) === -1);
   if (missing.length) {
     sheet.getRange(1, headers.length + 1, 1, missing.length).setValues([missing]);
   }
   return sheet;
+}
+
+// Фактические заголовки листа: по ним строится строка при записи.
+function getOfferTradesHeaders_(sheet) {
+  if (!sheet || sheet.getLastColumn() < 1) return [];
+  return sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(h => String(h || '').trim());
 }
 
 function normalizeHorizonTradeRecord_(rec) {
@@ -6726,22 +6741,24 @@ function fetchOfferTradesForAccount_(horizon, accountId, cursor, deadline) {
 }
 
 // Horizon trade не содержит tx_hash: один GET /operations/{opId} на opId, кэш на прогон.
-function resolveTradeTxHashes_(horizon, opIds) {
-  const cache = {};
-  for (const opId of opIds) {
-    if (!opId) continue;
-    if (Object.prototype.hasOwnProperty.call(cache, opId)) continue;
-    cache[opId] = '';
-    try {
-      const res = UrlFetchApp.fetch(`${horizon}/operations/${opId}`, { muteHttpExceptions: true });
-      if (res.getResponseCode() !== 200) continue;
-      const json = JSON.parse(res.getContentText());
-      cache[opId] = String(json.transaction_hash || '');
-    } catch (e) {
-      // недоступная операция → пустой tx_hash и пустой linked_transfer_key
-    }
+// Логика резолва (бюджет времени, кэш) — в DomainCore, здесь только HTTP.
+function resolveTradeTxHashes_(horizon, opIds, deadline) {
+  const result = getOfferTradeCore_().resolveTradeTxHashes(opIds, function (opId) {
+    const res = UrlFetchApp.fetch(`${horizon}/operations/${opId}`, { muteHttpExceptions: true });
+    return { status: res.getResponseCode(), body: res.getContentText() };
+  }, { deadline: deadline || 0, now: Date.now });
+  if (result.skipped || result.failed) {
+    writeDebugLog({
+      module: 'offer_trades',
+      timestamp: new Date().toISOString(),
+      stage: 'syncOfferTrades.tx_hash',
+      fund_key: 'PARTIAL',
+      api_calls: result.apiCalls,
+      details_json: `tx_hash: resolved=${result.apiCalls - result.failed}, failed=${result.failed}, ` +
+        `skipped_by_deadline=${result.skipped}`
+    });
   }
-  return cache;
+  return result;
 }
 
 // Курсоры OFFER_TRADES — append-only журнал, поэтому script-scope, а не user-scope.
@@ -6783,6 +6800,10 @@ function syncOfferTrades(options) {
   const sheet = dryRun ? existingSheet : ensureOfferTradesSheet_();
   const syncStamp = startedAt;
   const existingRows = existingSheet ? readSheetRowsAsObjects_(existingSheet) : [];
+  // Без листа дедуп-база пуста: would_append не является точным — помечаем явно.
+  const dedupeUnavailable = !existingSheet;
+  const sheetHeaders = sheet ? getOfferTradesHeaders_(sheet) : [];
+  const headers = sheetHeaders.length ? sheetHeaders : OFFER_TRADES_HEADERS.slice();
 
   let totalFetched = 0;
   const errors = [];
@@ -6816,7 +6837,8 @@ function syncOfferTrades(options) {
     }
   }
 
-  const txHashes = resolveTradeTxHashes_(horizon, opIds);
+  const txResolution = resolveTradeTxHashes_(horizon, opIds, deadline);
+  const txHashes = txResolution.cache;
 
   // Собираем записи из уже полученных результатов (fetch выполнен выше, повторных запросов нет).
   for (const item of accountResults) {
@@ -6834,17 +6856,15 @@ function syncOfferTrades(options) {
 
   const reconciled = core.reconcileOfferTrades(existingRows, pending);
   const plan = core.buildOfferTradeWritePlan(reconciled.fresh, { dryRun });
-  const rows = plan.rows.map(row => OFFER_TRADES_HEADERS.map(header => {
-    const value = row[header];
-    return value === undefined || value === null ? '' : value;
-  }));
+  // Строка пишется по фактическим заголовкам листа — порядок константы не важен.
+  const rows = plan.rows.map(row => mapObjectToRowByHeader_(row, headers));
   const linkedTransfers = plan.rows.filter(row => row.linked_transfer_key).length;
 
   let written = 0;
   if (!dryRun && rows.length && sheet) {
     try {
       sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
-      const closedAtIdx = OFFER_TRADES_HEADERS.indexOf('closed_at') + 1;
+      const closedAtIdx = headers.indexOf('closed_at') + 1;
       if (closedAtIdx > 0) {
         sheet.getRange(2, closedAtIdx, Math.max(sheet.getLastRow() - 1, 1), 1).setNumberFormat('dd-mm-yyyy hh:mm:ss');
       }
@@ -6881,7 +6901,8 @@ function syncOfferTrades(options) {
     timestamp: new Date().toISOString(),
     stage: 'syncOfferTrades',
     fund_key: errors.length ? 'PARTIAL' : 'SUCCESS',
-    api_calls: fundKeys.length,
+    // Реальные HTTP-вызовы: по одному /trades на аккаунт плюс резолв tx_hash на уникальный opId.
+    api_calls: fundKeys.length + txResolution.apiCalls,
     rows_fetched: totalFetched,
     rows_appended: written,
     dedup_skipped: reconciled.skipped,
@@ -6890,7 +6911,11 @@ function syncOfferTrades(options) {
       `would_append=${rows.length}, appended=${written}, duplicate_skipped=${reconciled.skipped}, ` +
       `rejected_no_key=${reconciled.rejected_no_key}, linked_transfers=${linkedTransfers}, ` +
       `out_of_scope=${reconciled.fresh.length - rows.length}, ` +
-      `truncated_accounts=${accountResults.filter(item => item.truncated).length}`
+      `truncated_accounts=${accountResults.filter(item => item.truncated).length}, ` +
+      `tx_hash_calls=${txResolution.apiCalls}, tx_hash_failed=${txResolution.failed}, ` +
+      `tx_hash_skipped_by_deadline=${txResolution.skipped}, ` +
+      `dedupe_unavailable=${dedupeUnavailable}` +
+      (dedupeUnavailable ? ' (dedupe unavailable, sheet missing)' : '')
   });
 
   return {
@@ -6903,6 +6928,9 @@ function syncOfferTrades(options) {
     rejectedNoKey: reconciled.rejected_no_key,
     linkedTransfers,
     byAccount: plan.byAccount,
+    headers,
+    dedupeUnavailable,
+    apiCalls: fundKeys.length + txResolution.apiCalls,
     rows,
     errors
   };
@@ -6917,6 +6945,8 @@ function syncOfferTradesDryRun() {
     rejectedNoKey: result.rejectedNoKey,
     linkedTransfers: result.linkedTransfers,
     byAccount: result.byAccount,
+    dedupeUnavailable: result.dedupeUnavailable,
+    apiCalls: result.apiCalls,
     errors: result.errors
   }));
   return result;

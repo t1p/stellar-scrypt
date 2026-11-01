@@ -81,11 +81,87 @@
   }
 
   function mapProjectIdForTransfer(transfer, indexes, options) {
-    const { from, to, asset_issuer, memo } = transfer || {};
+    const { from, to, asset_issuer, asset_code, memo } = transfer || {};
     const residentsIndex = (indexes && indexes.residentsIndex) || {};
+    const projectMapIndex = (indexes && indexes.projectMapIndex) || {};
     const accountToProjectIds = residentsIndex.accountToProjectIds || {};
     const issuerToProjectIds = residentsIndex.issuerToProjectIds || {};
     const opts = options || {};
+
+    const unique = values => [...new Set((values || []).filter(Boolean).map(String))];
+    const lookup = (map, key) => {
+      if (!map || !key) return [];
+      const value = map[key] || map[String(key).toUpperCase()] || map[String(key).toLowerCase()];
+      return Array.isArray(value) ? value : [];
+    };
+    const projectIdsByToken = projectMapIndex.tokenToProjectIds || opts.tokenToProjectIds || {};
+    const projectIdsByAssetCode = projectMapIndex.assetCodeToProjectIds || opts.assetCodeToProjectIds || projectIdsByToken;
+    const projectById = projectMapIndex.projectById || opts.projectById || {};
+    const escapeRegExp = value => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const hasToken = (text, token) => {
+      const normalizedText = String(text || '').normalize('NFKC');
+      const normalizedToken = String(token || '').normalize('NFKC').trim();
+      if (!normalizedText || !normalizedToken) return false;
+      return new RegExp(`(^|[^\\p{L}\\p{N}])${escapeRegExp(normalizedToken)}(?=$|[^\\p{L}\\p{N}])`, 'iu').test(normalizedText);
+    };
+    const memoTokenCandidates = text => {
+      const matches = [];
+      Object.keys(projectIdsByToken).forEach(token => { if (hasToken(text, token)) matches.push(...lookup(projectIdsByToken, token)); });
+      Object.keys(projectById).forEach(projectId => {
+        const mapping = projectById[projectId] || {};
+        if (mapping.token_symbol && hasToken(text, mapping.token_symbol)) matches.push(projectId);
+      });
+      return unique(matches);
+    };
+    const memoProjectCandidates = text => {
+      const known = [];
+      Object.keys(projectById).forEach(projectId => { if (hasToken(text, projectId)) known.push(projectId); });
+      const regex = opts.projectIdRegex || /(?:^|[^\p{L}\p{N}])([PMМ]?\d{3,6})(?=$|[^\p{L}\p{N}])/giu;
+      const source = String(text || '');
+      const matches = regex.global ? (() => {
+        const all = []; let current;
+        while ((current = regex.exec(source))) { all.push(current); if (current[0] === '') regex.lastIndex++; }
+        return all;
+      })() : (source.match(regex) ? [source.match(regex)] : []);
+      for (const match of matches) {
+        const projectId = (match[1] || match[0]).trim().replace(/^P/i, '');
+        const isKnown = typeof opts.isProjectIdKnown === 'function' ? opts.isProjectIdKnown(projectId) : Boolean(projectById[projectId]);
+        if (isKnown) known.push(projectId);
+      }
+      return unique(known);
+    };
+    const configuredMemoCandidates = text => {
+      const patterns = opts.projectMemoPatterns || projectMapIndex.projectMemoPatterns || {};
+      const matches = [];
+      Object.keys(patterns).forEach(projectId => {
+        const projectPatterns = Array.isArray(patterns[projectId]) ? patterns[projectId] : [patterns[projectId]];
+        if (projectPatterns.some(pattern => pattern instanceof RegExp ? pattern.test(String(text || '')) : hasToken(text, pattern))) matches.push(projectId);
+      });
+      return unique(matches);
+    };
+    const narrowingEvidence = () => [
+      { ids: memoProjectCandidates(memo), method: 'MEMO_PROJECT_ID' },
+      { ids: memoTokenCandidates(memo), method: 'MEMO_TOKEN' },
+      { ids: lookup(projectIdsByAssetCode, String(asset_code || '').trim().toUpperCase()), method: 'ASSET_CODE' },
+      { ids: configuredMemoCandidates(memo), method: 'PROJECT_MEMO_PATTERN' }
+    ];
+    const narrow = (candidates, ids) => {
+      const narrowed = unique(ids).filter(projectId => candidates.includes(projectId));
+      return narrowed.length === 1 ? narrowed[0] : null;
+    };
+    const resolved = (projectId, method) => ({ project_id: projectId, mapping_method: method, candidates: [projectId], anomaly: null });
+    const resolveAmbiguous = candidates => {
+      const evidence = narrowingEvidence().filter(item => item.ids.length > 0);
+      let narrowed = unique(candidates);
+      let method = null;
+      for (const item of evidence) {
+        const overlap = narrowed.filter(projectId => item.ids.includes(projectId));
+        if (!overlap.length) return null;
+        narrowed = overlap;
+        if (!method) method = item.method;
+      }
+      return narrowed.length === 1 ? resolved(narrowed[0], method) : null;
+    };
 
     let anomaly = null;
 
@@ -97,6 +173,8 @@
       if (accountCandidates.length === 1) {
         return { project_id: accountCandidates[0], mapping_method: 'RESIDENTS_ACCOUNT', candidates: accountCandidates, anomaly: null };
       }
+      const narrowed = resolveAmbiguous(accountCandidates);
+      if (narrowed) return narrowed;
       anomaly = {
         reason: 'AMBIGUOUS',
         matched_accounts: [from, to].filter(a => accountToProjectIds[a] && accountToProjectIds[a].length > 0),
@@ -113,6 +191,8 @@
       if (issuerCandidates.length === 1) {
         return { project_id: issuerCandidates[0], mapping_method: 'RESIDENTS_ISSUER', candidates: issuerCandidates, anomaly: null };
       }
+      const narrowed = resolveAmbiguous(issuerCandidates);
+      if (narrowed) return narrowed;
       anomaly = {
         reason: 'AMBIGUOUS',
         matched_accounts: [],
@@ -123,20 +203,20 @@
       return { project_id: 'AMBIGUOUS', mapping_method: 'AMBIGUOUS', candidates: issuerCandidates, anomaly };
     }
 
-    // Шаг 3: memo содержит Project_ID
-    const regex = opts.projectIdRegex || /\bP?\d{3,6}\b/;
-    const memoMatch = String(memo || '').match(regex);
-    if (memoMatch) {
-      const projectIdFromMemo = memoMatch[0].replace(/^P/i, ''); // Убираем P если есть
-      const isKnownProjectId = typeof opts.isProjectIdKnown === 'function'
-        ? opts.isProjectIdKnown
-        : function () { return true; };
-      if (isKnownProjectId(projectIdFromMemo)) {
-        return { project_id: projectIdFromMemo, mapping_method: 'MEMO_PROJECT_ID', candidates: [projectIdFromMemo], anomaly: null };
-      }
+    // Шаг 3: для UNMAPPED используем только однозначное пересечение memo/asset/config сигналов.
+    const unmappedEvidence = narrowingEvidence().filter(item => item.ids.length > 0);
+    let unmappedIds = null;
+    let unmappedMethod = null;
+    for (const item of unmappedEvidence) {
+      unmappedIds = unmappedIds === null
+        ? unique(item.ids)
+        : unmappedIds.filter(projectId => item.ids.includes(projectId));
+      if (!unmappedMethod) unmappedMethod = item.method;
+      if (!unmappedIds.length) break;
     }
+    if (unmappedIds && unmappedIds.length === 1) return resolved(unmappedIds[0], unmappedMethod);
 
-    // Шаг 4: UNMAPPED
+    // Шаг 5: UNMAPPED
     anomaly = {
       reason: 'UNMAPPED',
       matched_accounts: [],

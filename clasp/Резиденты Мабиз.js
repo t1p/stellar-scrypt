@@ -30,6 +30,7 @@ const SHEET_MAYMUN_ALLOCATIONS = 'MAYMUN_ALLOCATIONS';
 const SHEET_MAYMUN_EXPENSES = 'MAYMUN_EXPENSES';
 const SHEET_MAYMUN_RUNWAY = 'MAYMUN_RUNWAY';
 const SHEET_MAYMUN_RUNS = 'MAYMUN_RUNS';
+const SHEET_MAYMUN_PRECHECK_CANDIDATES = 'MAYMUN_PRECHECK_CANDIDATES';
 
 const MAYMUN_EVENTS_HEADERS = [
   'event_id', 'source_type', 'source_sheet', 'source_row', 'tx_hash', 'op_id', 'transfer_key',
@@ -66,6 +67,14 @@ const MAYMUN_RUNS_HEADERS = [
   'run_id', 'run_type', 'status', 'started_at', 'finished_at',
   'candidate_count', 'expected_events', 'expected_decisions', 'expected_allocations',
   'expected_runway_impact_json', 'asset_scope', 'operator', 'notes', 'error'
+];
+
+const MAYMUN_PRECHECK_CANDIDATES_HEADERS = [
+  'candidate_id', 'run_id', 'source_sheet', 'source_row', 'tx_hash', 'op_id', 'transfer_key',
+  'datetime', 'direction', 'class', 'project_id', 'amount', 'asset_code', 'asset_issuer', 'fund_account_key',
+  'from_label', 'to_label', 'memo', 'proposed_event_type', 'proposed_event_status', 'proposed_confidence',
+  'proposed_decision_required', 'approval_status', 'approval_by', 'approval_at', 'processing_status',
+  'processed_at', 'result_event_id', 'result_decision_id', 'error', 'notes'
 ];
 
 const MEMO_CACHE_TTL = 21600; // 6 часов
@@ -130,6 +139,7 @@ function onOpen() {
     .addItem('MAYMUN: Create allocation from selected EVENT', 'runMaymunAssetLayerCreateAllocationFromSelectedEvent')
     .addItem('MAYMUN: Create runway snapshot', 'runMaymunAssetLayerCreateRunwaySnapshot')
     .addItem('MAYMUN: Precheck unprocessed TRANSFERS', 'runMaymunAssetLayerPrecheckUnprocessedTransfers')
+    .addItem('MAYMUN: Process approved PRECHECK candidates', 'runMaymunAssetLayerProcessApprovedPrecheckCandidates')
     .addSeparator()
     .addItem('Обновить Created данные аккаунтов', 'updateAccountCreationDetails')
     .addItem('Обновить метаданные аккаунтов', 'syncAccountsMeta')
@@ -526,7 +536,7 @@ function syncStellarTransfers() {
       const tags = fundKey === 'MABIZ_DEFAULT' ? 'D' : '';
 
       // Маппинг project_id
-      const mappingResult = mapProjectIdForTransfer_({ from, to, asset_issuer: assetIssuer, memo: memoText }, indexes);
+      const mappingResult = mapProjectIdForTransfer_({ from, to, asset_issuer: assetIssuer, asset_code: assetCode, memo: memoText }, indexes);
       const projectId = mappingResult.project_id;
       
       if (projectId === 'UNMAPPED') log.unmapped_count++;
@@ -576,7 +586,8 @@ function syncStellarTransfers() {
         projectId,
         transferClass,
         '', // class_override
-        tags
+        tags,
+        mappingResult.mapping_method
       ];
       rows.push(row);
     }
@@ -1278,6 +1289,8 @@ function parseAccountsSheet(sheet) {
 function parseProjectMapSheet(sheet) {
   if (!sheet) return {};
   const rows = sheet.getDataRange().getValues();
+  const headers = rows[0] || [];
+  const memoPatternsIdx = headers.findIndex(header => ['memo_patterns', 'memo_pattern', 'memo_templates', 'memo_template'].includes(normalizeHeaderKey_(header)));
   const map = {};
   for (let i = 1; i < rows.length; i++) { // Пропускаем заголовок
     const [projectId, clickupTaskId, stellarAccount, stellarIssuer, tokenSymbol, isActive] = rows[i];
@@ -1286,7 +1299,10 @@ function parseProjectMapSheet(sheet) {
         clickup_task_id: clickupTaskId ? String(clickupTaskId).trim() : null,
         stellar_account: stellarAccount ? String(stellarAccount).trim() : null,
         stellar_issuer: stellarIssuer ? String(stellarIssuer).trim() : null,
-        token_symbol: tokenSymbol ? String(tokenSymbol).trim() : null
+        token_symbol: tokenSymbol ? String(tokenSymbol).trim() : null,
+        memo_patterns: memoPatternsIdx >= 0 && rows[i][memoPatternsIdx]
+          ? String(rows[i][memoPatternsIdx]).split('|').map(pattern => pattern.trim()).filter(Boolean)
+          : []
       };
     }
   }
@@ -1300,11 +1316,16 @@ function buildProjectMapIndex_() {
   const index = {
     stellarAccountToProjectIds: {},
     stellarIssuerToProjectIds: {},
-    tokenToProjectIds: {}
+    tokenToProjectIds: {},
+    assetCodeToProjectIds: {},
+    projectById: {},
+    projectMemoPatterns: {}
   };
 
   for (const projectId in projectMap) {
     const mapping = projectMap[projectId];
+    index.projectById[projectId] = mapping;
+    if (mapping.memo_patterns && mapping.memo_patterns.length) index.projectMemoPatterns[projectId] = mapping.memo_patterns;
     if (mapping.stellar_account) {
       const acc = mapping.stellar_account;
       if (!index.stellarAccountToProjectIds[acc]) index.stellarAccountToProjectIds[acc] = [];
@@ -1325,6 +1346,9 @@ function buildProjectMapIndex_() {
       if (!index.tokenToProjectIds[tok].includes(projectId)) {
         index.tokenToProjectIds[tok].push(projectId);
       }
+      const normalizedToken = String(mapping.token_symbol).trim().toUpperCase();
+      if (!index.assetCodeToProjectIds[normalizedToken]) index.assetCodeToProjectIds[normalizedToken] = [];
+      if (!index.assetCodeToProjectIds[normalizedToken].includes(projectId)) index.assetCodeToProjectIds[normalizedToken].push(projectId);
     }
   }
 
@@ -1395,7 +1419,7 @@ function buildResidentsIndex_() {
 function mapProjectIdForTransfer_(transfer, indexes) {
   const core = getDomainCore_();
   if (typeof core.mapProjectIdForTransfer === 'function') {
-    const regex = PROJECT_ID_REGEX || /\bP?\d{3,6}\b/;
+    const regex = PROJECT_ID_REGEX || /(?:^|[^\p{L}\p{N}])([PMМ]?\d{3,6})(?=$|[^\p{L}\p{N}])/giu;
     return core.mapProjectIdForTransfer(transfer, indexes, {
       projectIdRegex: regex,
       isProjectIdKnown: function (projectId) {
@@ -1406,8 +1430,59 @@ function mapProjectIdForTransfer_(transfer, indexes) {
     });
   }
 
-  const { from, to, asset_issuer, memo } = transfer;
+  const { from, to, asset_issuer, asset_code, memo } = transfer;
   const { accountToProjectIds, issuerToProjectIds } = indexes.residentsIndex;
+  const projectMapIndex = indexes.projectMapIndex || {};
+  const projectIdsByToken = projectMapIndex.tokenToProjectIds || {};
+  const projectIdsByAssetCode = projectMapIndex.assetCodeToProjectIds || projectIdsByToken;
+  const projectById = projectMapIndex.projectById || {};
+  const unique = values => [...new Set((values || []).filter(Boolean).map(String))];
+  const lookup = (map, key) => {
+    const target = String(key || '').trim().toUpperCase();
+    if (!target) return [];
+    return unique(Object.keys(map || {}).filter(k => String(k).trim().toUpperCase() === target).flatMap(k => Array.isArray(map[k]) ? map[k] : []));
+  };
+  const escapeRegExp = value => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const hasToken = (text, token) => {
+    const source = String(text || '').normalize('NFKC');
+    const target = String(token || '').normalize('NFKC').trim();
+    return source && target && new RegExp(`(^|[^\\p{L}\\p{N}])${escapeRegExp(target)}(?=$|[^\\p{L}\\p{N}])`, 'iu').test(source);
+  };
+  const memoProjectCandidates = text => {
+    const ids = Object.keys(projectById).filter(projectId => hasToken(text, projectId));
+    const regex = PROJECT_ID_REGEX || /(?:^|[^\p{L}\p{N}])([PMМ]?\d{3,6})(?=$|[^\p{L}\p{N}])/giu;
+    const scan = new RegExp(regex.source, regex.flags.indexOf('g') >= 0 ? regex.flags : regex.flags + 'g');
+    let match;
+    while ((match = scan.exec(String(text || ''))) !== null) {
+      const raw = (match[1] || match[0]).trim().replace(/^P/i, '');
+      if (projectById[raw] || projectById[raw.replace(/[\u041c]/g, 'M')] || projectById[raw.replace(/^M/, 'М')]) ids.push(projectById[raw] ? raw : (projectById[raw.replace(/[\u041c]/g, 'M')] ? raw.replace(/[\u041c]/g, 'M') : raw.replace(/^M/, 'М')));
+      if (match[0] === '') scan.lastIndex++;
+    }
+    return unique(ids);
+  };
+  const memoTokenCandidates = text => unique(Object.keys(projectIdsByToken).flatMap(token => hasToken(text, token) ? lookup(projectIdsByToken, token) : []));
+  const configuredMemoCandidates = text => {
+    const patterns = projectMapIndex.projectMemoPatterns || {};
+    return unique(Object.keys(patterns).filter(projectId => (Array.isArray(patterns[projectId]) ? patterns[projectId] : [patterns[projectId]]).some(pattern => hasToken(text, pattern))));
+  };
+  const narrowingEvidence = () => [
+    { ids: memoProjectCandidates(memo), method: 'MEMO_PROJECT_ID' },
+    { ids: memoTokenCandidates(memo), method: 'MEMO_TOKEN' },
+    { ids: lookup(projectIdsByAssetCode, asset_code), method: 'ASSET_CODE' },
+    { ids: configuredMemoCandidates(memo), method: 'PROJECT_MEMO_PATTERN' }
+  ].filter(item => item.ids.length > 0);
+  const resolveAmbiguous = candidates => {
+    const evidence = narrowingEvidence();
+    let narrowed = unique(candidates);
+    let method = null;
+    for (const item of evidence) {
+      const overlap = narrowed.filter(projectId => item.ids.includes(projectId));
+      if (!overlap.length) return null;
+      narrowed = overlap;
+      if (!method) method = item.method;
+    }
+    return narrowed.length === 1 ? { project_id: narrowed[0], mapping_method: method, candidates: narrowed, anomaly: null } : null;
+  };
   
   let candidates = [];
   let anomaly = null;
@@ -1420,6 +1495,8 @@ function mapProjectIdForTransfer_(transfer, indexes) {
     if (accountCandidates.length === 1) {
       return { project_id: accountCandidates[0], mapping_method: 'RESIDENTS_ACCOUNT', candidates: accountCandidates, anomaly: null };
     } else {
+      const narrowed = resolveAmbiguous(accountCandidates);
+      if (narrowed) return narrowed;
       anomaly = {
         reason: 'AMBIGUOUS',
         matched_accounts: [from, to].filter(a => accountToProjectIds[a] && accountToProjectIds[a].length > 0),
@@ -1437,6 +1514,8 @@ function mapProjectIdForTransfer_(transfer, indexes) {
     if (issuerCandidates.length === 1) {
       return { project_id: issuerCandidates[0], mapping_method: 'RESIDENTS_ISSUER', candidates: issuerCandidates, anomaly: null };
     } else {
+      const narrowed = resolveAmbiguous(issuerCandidates);
+      if (narrowed) return narrowed;
       anomaly = {
         reason: 'AMBIGUOUS',
         matched_accounts: [],
@@ -1448,17 +1527,17 @@ function mapProjectIdForTransfer_(transfer, indexes) {
     }
   }
 
-  // Шаг 3: memo содержит Project_ID
-  const regex = PROJECT_ID_REGEX || /\bP?\d{3,6}\b/;
-  const memoMatch = String(memo || '').match(regex);
-  if (memoMatch) {
-    const projectIdFromMemo = memoMatch[0].replace(/^P/i, ''); // Убираем P если есть
-    // Проверим, есть ли такой project_id в PROJECT_MAP
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const projectMap = parseProjectMapSheet(ss.getSheetByName(SHEET_PROJECT_MAP));
-    if (projectMap[projectIdFromMemo]) {
-      return { project_id: projectIdFromMemo, mapping_method: 'MEMO_PROJECT_ID', candidates: [projectIdFromMemo], anomaly: null };
-    }
+  // Шаг 3: для UNMAPPED принимаем только одно согласованное детерминированное решение.
+  const unmappedEvidence = narrowingEvidence();
+  let unmappedIds = null;
+  let unmappedMethod = null;
+  for (const item of unmappedEvidence) {
+    unmappedIds = unmappedIds === null ? unique(item.ids) : unmappedIds.filter(projectId => item.ids.includes(projectId));
+    if (!unmappedMethod) unmappedMethod = item.method;
+    if (!unmappedIds.length) break;
+  }
+  if (unmappedIds && unmappedIds.length === 1) {
+    return { project_id: unmappedIds[0], mapping_method: unmappedMethod, candidates: unmappedIds, anomaly: null };
   }
 
   // Шаг 4: UNMAPPED
@@ -1597,9 +1676,15 @@ function remappingProjectIds() {
   
   if (!transfersSheet || transfersSheet.getLastRow() <= 1) return;
 
+  const headers = transfersSheet.getRange(1, 1, 1, transfersSheet.getLastColumn()).getValues()[0];
+  let mappingMethodIdx = headers.indexOf('mapping_method');
+  if (mappingMethodIdx === -1) {
+    mappingMethodIdx = headers.length;
+    transfersSheet.getRange(1, mappingMethodIdx + 1).setValue('mapping_method');
+    headers.push('mapping_method');
+  }
   const dataRange = transfersSheet.getRange(2, 1, transfersSheet.getLastRow() - 1, transfersSheet.getLastColumn());
   const data = dataRange.getValues();
-  const headers = transfersSheet.getRange(1, 1, 1, transfersSheet.getLastColumn()).getValues()[0];
 
   const fromIdx = headers.indexOf('from');
   const toIdx = headers.indexOf('to');
@@ -1635,12 +1720,14 @@ function remappingProjectIds() {
       from: row[fromIdx],
       to: row[toIdx],
       asset_issuer: row[assetIssuerIdx],
+      asset_code: headers.indexOf('asset_code') === -1 ? '' : row[headers.indexOf('asset_code')],
       memo: row[memoIdx]
     };
 
     const mappingResult = mapProjectIdForTransfer_(transfer, indexes);
     if (mappingResult.project_id !== currentProjectId) {
       row[projectIdIdx] = mappingResult.project_id;
+      if (mappingMethodIdx !== -1) row[mappingMethodIdx] = mappingResult.mapping_method;
       count++;
 
       if (mappingResult.anomaly && txHash) {
@@ -2150,6 +2237,26 @@ function ensureMaymunRunsSheet_() {
   return { sheet: sheet, created: created, missingHeaders: missing };
 }
 
+function ensureMaymunPrecheckCandidatesSheet_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(SHEET_MAYMUN_PRECHECK_CANDIDATES);
+  let created = false;
+
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_MAYMUN_PRECHECK_CANDIDATES);
+    sheet.appendRow(MAYMUN_PRECHECK_CANDIDATES_HEADERS);
+    created = true;
+  }
+
+  const shape = getSheetByHeaderMap_(sheet);
+  const missing = validateSheetHeaders_(shape.headers, MAYMUN_PRECHECK_CANDIDATES_HEADERS);
+  if (missing.length) {
+    sheet.getRange(1, shape.headers.length + 1, 1, missing.length).setValues([missing]);
+  }
+
+  return { sheet: sheet, created: created, missingHeaders: missing };
+}
+
 function ensureMaymunAssetLayerSheets(options) {
   const opts = normalizeOptions_(options);
   const results = [
@@ -2157,7 +2264,8 @@ function ensureMaymunAssetLayerSheets(options) {
     ensureMaymunDecisionsSheet_(opts),
     ensureMaymunAllocationsSheet_(opts),
     ensureMaymunExpensesSheet_(opts),
-    ensureMaymunRunwaySheet_(opts)
+    ensureMaymunRunwaySheet_(opts),
+    ensureSheetWithHeaders_(SHEET_MAYMUN_PRECHECK_CANDIDATES, MAYMUN_PRECHECK_CANDIDATES_HEADERS, opts)
   ];
 
   writeDebugLog({
@@ -2345,7 +2453,8 @@ function getMaymunSheetSpecs_() {
     { sheetName: SHEET_MAYMUN_DECISIONS, requiredHeaders: MAYMUN_DECISIONS_HEADERS },
     { sheetName: SHEET_MAYMUN_ALLOCATIONS, requiredHeaders: MAYMUN_ALLOCATIONS_HEADERS },
     { sheetName: SHEET_MAYMUN_EXPENSES, requiredHeaders: MAYMUN_EXPENSES_HEADERS },
-    { sheetName: SHEET_MAYMUN_RUNWAY, requiredHeaders: MAYMUN_RUNWAY_HEADERS }
+    { sheetName: SHEET_MAYMUN_RUNWAY, requiredHeaders: MAYMUN_RUNWAY_HEADERS },
+    { sheetName: SHEET_MAYMUN_PRECHECK_CANDIDATES, requiredHeaders: MAYMUN_PRECHECK_CANDIDATES_HEADERS }
   ];
 }
 
@@ -4234,12 +4343,12 @@ function fetchTransactionsBetweenAddresses(fromAddr, toAddr, assetCode, assetIss
 
 // ========== Тестовая функция ==========
 function testFetchTransactionsBetweenAddresses() {
-  const fromAddr = 'GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
-  const toAddr = 'GYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY';
+  const fromAddr = 'GDH25HPTORZCNYJPOEBFLQJ76LAGSWQD3F5H22HT37MHEZGYWD3KD77W';
+  const toAddr = 'GARNOMR62CRFSI2G2OQYA5SPGFFDBBY566AWZF4637MNF74UZMBNOZVD';
   const assetCode = 'EURMTL';
-  const assetIssuer = 'GZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ';
-  const startDate = new Date('2022-01-01T00:00:00Z');
-  const endDate = new Date('2026-01-01T23:59:59Z');
+  const assetIssuer = 'GACKTN5DAZGWXRWB2WLM6OPBDHAMT6SJNGLJZPQMEZBUR4JUGBX2UK7V';
+  const startDate = new Date('2025-01-01T00:00:00Z');
+  const endDate = new Date('2026-08-12T23:59:59Z');
   try {
     fetchTransactionsBetweenAddresses(fromAddr, toAddr, assetCode, assetIssuer, startDate, endDate);
     Logger.log('Тест завершен успешно.');
@@ -4611,6 +4720,7 @@ function initializeNewSheets() {
   initializeResidentTimeline();
   initializeTokenFlows();
   initializeIssuerStructure();
+  ensureMaymunPrecheckCandidatesSheet_();
   writeDebugLog({
     timestamp: new Date().toISOString(),
     stage: 'initializeNewSheets',
@@ -4628,7 +4738,7 @@ function upgradeTransfersSheet() {
   if (!sheet) return;
   const headersRange = sheet.getRange(1, 1, 1, sheet.getLastColumn());
   const headers = headersRange.getValues()[0];
-  const newCols = ['fund_account_key', 'asset_code', 'asset_issuer', 'asset_full', 'op_id', 'direction', 'counterparty_type', 'project_id', 'class', 'class_override', 'tags'];
+  const newCols = ['fund_account_key', 'asset_code', 'asset_issuer', 'asset_full', 'op_id', 'direction', 'counterparty_type', 'project_id', 'class', 'class_override', 'tags', 'mapping_method'];
   const missing = newCols.filter(col => headers.indexOf(col) === -1);
   if (missing.length > 0) {
     headersRange.offset(0, headers.length, 1, missing.length).setValues([missing]);
@@ -4673,6 +4783,7 @@ function upgradeExistingSheets() {
   initializeResidentTimeline();
   initializeTokenFlows();
   initializeIssuerStructure();
+  ensureMaymunPrecheckCandidatesSheet_();
 }
 
 function initializeMaymunAssetLayerSheetsManual() {
@@ -5430,7 +5541,19 @@ function buildMaymunTransferEventCandidate_(transferData, selectedRow, now, runI
   };
 }
 
-// Precheck flow (v1.0, 2026-04-25T14:45:00Z): scan unprocessed TRANSFERS and produce manual-only recommendations.
+function buildMaymunPrecheckCandidateId_(txHash, opId) {
+  return `cand_${sanitizeForId_(txHash)}_${sanitizeForId_(opId)}`;
+}
+
+function rowToObjectByHeaders_(row, headers) {
+  const out = {};
+  for (let i = 0; i < headers.length; i++) {
+    out[headers[i]] = row[i];
+  }
+  return out;
+}
+
+// Precheck queue flow (v1.1, 2026-04-25T15:35:00Z): writes candidate queue with manual approval state.
 function runMaymunAssetLayerPrecheckUnprocessedTransfers() {
   assertManualUiContext_();
 
@@ -5442,14 +5565,14 @@ function runMaymunAssetLayerPrecheckUnprocessedTransfers() {
   try {
     const transfersSheet = ss.getSheetByName(SHEET_TRANSFERS);
     const eventsSheet = ss.getSheetByName(SHEET_MAYMUN_EVENTS);
-    ensureMaymunRunsSheet_();
+    const runsSheet = ensureMaymunRunsSheet_().sheet;
+    const precheckSheet = ensureMaymunPrecheckCandidatesSheet_().sheet;
 
     if (!transfersSheet || transfersSheet.getLastRow() <= 1) {
       const nothingMsg = 'Nothing to process: TRANSFERS is empty or has no data rows.';
-      writeDebugLog({ run_id: runId, module: 'maymun_asset_layer', timestamp: startedAt, stage: 'scan', fundKey: SHEET_TRANSFERS, details: nothingMsg });
+      writeDebugLog({ run_id: runId, module: 'maymun_asset_layer', timestamp: startedAt, stage: 'precheck_candidates_scan', fundKey: SHEET_TRANSFERS, details: nothingMsg });
       ui.alert(nothingMsg);
-      Logger.log(nothingMsg);
-      return { runId: runId, candidate_count: 0, expected_events: 0, expected_decisions: 0 };
+      return { runId: runId, candidate_count: 0, upserted: 0 };
     }
 
     const transfersShape = getSheetByHeaderMap_(transfersSheet);
@@ -5459,32 +5582,52 @@ function runMaymunAssetLayerPrecheckUnprocessedTransfers() {
       throw new Error('TRANSFERS headers missing: ' + missingTransferHeaders.join(', '));
     }
 
-    const transferData = transfersSheet.getRange(2, 1, transfersSheet.getLastRow() - 1, transfersSheet.getLastColumn()).getValues();
     const existingTransferKeys = new Set();
-
     if (eventsSheet && eventsSheet.getLastRow() > 1) {
       const eventShape = getSheetByHeaderMap_(eventsSheet);
-      const transferKeyIdx = eventShape.headerMap['transfer_key'];
-      const txHashIdx = eventShape.headerMap['tx_hash'];
-      const opIdIdx = eventShape.headerMap['op_id'];
       const eventsData = eventsSheet.getRange(2, 1, eventsSheet.getLastRow() - 1, eventsSheet.getLastColumn()).getValues();
       for (let i = 0; i < eventsData.length; i++) {
-        const keyByTransfer = transferKeyIdx !== undefined ? String(eventsData[i][transferKeyIdx] || '').trim() : '';
-        const keyByParts = (txHashIdx !== undefined && opIdIdx !== undefined)
-          ? `${String(eventsData[i][txHashIdx] || '').trim()}:${String(eventsData[i][opIdIdx] || '').trim()}`
-          : '';
-        const key = keyByTransfer || keyByParts;
+        const txHash = eventShape.headerMap['tx_hash'] !== undefined ? String(eventsData[i][eventShape.headerMap['tx_hash']] || '').trim() : '';
+        const opId = eventShape.headerMap['op_id'] !== undefined ? String(eventsData[i][eventShape.headerMap['op_id']] || '').trim() : '';
+        const transferKey = eventShape.headerMap['transfer_key'] !== undefined ? String(eventsData[i][eventShape.headerMap['transfer_key']] || '').trim() : '';
+        const key = transferKey || `${txHash}:${opId}`;
         if (key && key !== ':') existingTransferKeys.add(key);
       }
     }
 
-    const idx = transfersShape.headerMap;
-    const candidateTransfers = [];
-    const ignoredRows = [];
+    const precheckShape = getSheetByHeaderMap_(precheckSheet);
+    const precheckData = precheckSheet.getLastRow() > 1
+      ? precheckSheet.getRange(2, 1, precheckSheet.getLastRow() - 1, precheckSheet.getLastColumn()).getValues()
+      : [];
+    const precheckByTransferKey = {};
+    for (let i = 0; i < precheckData.length; i++) {
+      const rowObj = rowToObjectByHeaders_(precheckData[i], precheckShape.headers);
+      const key = String(rowObj.transfer_key || '').trim();
+      if (!key) continue;
+      precheckByTransferKey[key] = { rowIndex: i + 2, rowObj: rowObj };
+    }
 
-    for (let i = 0; i < transferData.length; i++) {
-      const row = transferData[i];
-      const rowNumber = i + 2;
+    const transfersData = transfersSheet.getRange(2, 1, transfersSheet.getLastRow() - 1, transfersSheet.getLastColumn()).getValues();
+    const idx = transfersShape.headerMap;
+    let candidateCount = 0;
+    let upserted = 0;
+    let inserted = 0;
+    let updated = 0;
+    let decisionRequiredCount = 0;
+
+    writeDebugLog({
+      run_id: runId,
+      module: 'maymun_asset_layer',
+      timestamp: stableNowIso_(),
+      stage: 'precheck_candidates_scan',
+      fundKey: SHEET_TRANSFERS,
+      rows_fetched: transfersData.length,
+      details: JSON.stringify({ existing_events_transfer_keys: existingTransferKeys.size, existing_precheck_transfer_keys: Object.keys(precheckByTransferKey).length })
+    });
+
+    for (let i = 0; i < transfersData.length; i++) {
+      const row = transfersData[i];
+      const sourceRow = i + 2;
       const txHash = String(row[idx['tx_hash']] || '').trim();
       const opId = String(row[idx['op_id']] || '').trim();
       const direction = String(row[idx['direction']] || '').trim().toUpperCase();
@@ -5492,48 +5635,17 @@ function runMaymunAssetLayerPrecheckUnprocessedTransfers() {
       const assetCode = String(row[idx['asset_code']] || '').trim();
       const transferKey = `${txHash}:${opId}`;
 
-      if (!txHash || !opId || !amount || !assetCode || (direction !== 'IN' && direction !== 'OUT')) {
-        ignoredRows.push({ row: rowNumber, reason: 'missing_required_fields_or_invalid_direction' });
-        continue;
-      }
+      if (!txHash || !opId || !amount || !assetCode || (direction !== 'IN' && direction !== 'OUT')) continue;
+      if (existingTransferKeys.has(transferKey)) continue;
 
-      if (existingTransferKeys.has(transferKey)) {
-        continue;
-      }
+      candidateCount += 1;
 
-      candidateTransfers.push({ row: rowNumber, rowData: row, transferKey: transferKey });
-    }
-
-    writeDebugLog({
-      run_id: runId,
-      module: 'maymun_asset_layer',
-      timestamp: stableNowIso_(),
-      stage: 'scan',
-      fundKey: SHEET_TRANSFERS,
-      rows_fetched: transferData.length,
-      details: JSON.stringify({
-        candidate_count: candidateTransfers.length,
-        ignored_count: ignoredRows.length,
-        processed_transfer_keys: existingTransferKeys.size
-      })
-    });
-
-    const candidateEvents = [];
-    const candidateDecisions = [];
-    const risks = [];
-    const assetScopeMap = {};
-    let confirmedCount = 0;
-    let manualReviewCount = 0;
-
-    for (let i = 0; i < candidateTransfers.length; i++) {
-      const item = candidateTransfers[i];
-      const row = item.rowData;
       const transferDataObj = {
-        tx_hash: row[idx['tx_hash']],
-        op_id: row[idx['op_id']],
-        amount: row[idx['amount']],
-        asset_code: row[idx['asset_code']],
-        direction: row[idx['direction']],
+        tx_hash: txHash,
+        op_id: opId,
+        amount: amount,
+        asset_code: assetCode,
+        direction: direction,
         project_id: idx['project_id'] !== undefined ? row[idx['project_id']] : '',
         fund_account_key: idx['fund_account_key'] !== undefined ? row[idx['fund_account_key']] : '',
         class: idx['class'] !== undefined ? row[idx['class']] : '',
@@ -5543,176 +5655,113 @@ function runMaymunAssetLayerPrecheckUnprocessedTransfers() {
         to_label: idx['to_label'] !== undefined ? row[idx['to_label']] : '',
         memo: idx['memo'] !== undefined ? row[idx['memo']] : ''
       };
+      const built = buildMaymunTransferEventCandidate_(transferDataObj, sourceRow, startedAt, runId);
+      const proposedDecisionRequired = built.eventStatus === 'manual_review' ? 'TRUE' : 'FALSE';
+      if (proposedDecisionRequired === 'TRUE') decisionRequiredCount += 1;
 
-      const built = buildMaymunTransferEventCandidate_(transferDataObj, item.row, startedAt, runId);
-      candidateEvents.push(built.event);
-      assetScopeMap[String(built.event.asset_code || '').trim() || 'UNKNOWN'] = true;
+      const existing = precheckByTransferKey[transferKey];
+      const existingApproval = existing ? String(existing.rowObj.approval_status || '').trim().toLowerCase() : '';
+      const keepApproval = existingApproval === 'approved' || existingApproval === 'rejected' || existingApproval === 'hold';
 
-      if (!String(built.event.asset_issuer || '').trim()) {
-        risks.push('missing asset_issuer');
-      }
-      if (isUnresolvedProjectId_(built.event.project_id)) {
-        risks.push('ambiguous project mapping');
-      }
+      const payload = {
+        candidate_id: buildMaymunPrecheckCandidateId_(txHash, opId),
+        run_id: runId,
+        source_sheet: SHEET_TRANSFERS,
+        source_row: String(sourceRow),
+        tx_hash: txHash,
+        op_id: opId,
+        transfer_key: transferKey,
+        datetime: String(transferDataObj.datetime || '').trim(),
+        direction: direction,
+        class: String(transferDataObj.class || '').trim(),
+        project_id: String(transferDataObj.project_id || '').trim(),
+        amount: amount,
+        asset_code: assetCode,
+        asset_issuer: String(transferDataObj.asset_issuer || '').trim(),
+        fund_account_key: String(transferDataObj.fund_account_key || '').trim(),
+        from_label: String(transferDataObj.from_label || '').trim(),
+        to_label: String(transferDataObj.to_label || '').trim(),
+        memo: String(transferDataObj.memo || '').trim(),
+        proposed_event_type: built.event.event_type,
+        proposed_event_status: built.event.event_status,
+        proposed_confidence: built.event.confidence,
+        proposed_decision_required: proposedDecisionRequired,
+        approval_status: keepApproval ? existingApproval : (existingApproval || 'pending'),
+        approval_by: existing && keepApproval ? String(existing.rowObj.approval_by || '') : '',
+        approval_at: existing && keepApproval ? String(existing.rowObj.approval_at || '') : '',
+        processing_status: existing ? String(existing.rowObj.processing_status || 'new') : 'new',
+        processed_at: existing ? String(existing.rowObj.processed_at || '') : '',
+        result_event_id: existing ? String(existing.rowObj.result_event_id || '') : '',
+        result_decision_id: existing ? String(existing.rowObj.result_decision_id || '') : '',
+        error: existing ? String(existing.rowObj.error || '') : '',
+        notes: built.event.notes
+      };
 
-      if (built.eventStatus === 'confirmed') {
-        confirmedCount += 1;
-        writeDebugLog({
-          run_id: runId,
-          module: 'maymun_asset_layer',
-          timestamp: stableNowIso_(),
-          stage: 'classify',
-          fundKey: SHEET_TRANSFERS,
-          details: `row=${item.row}; transfer_key=${item.transferKey}; class=confirmed_candidate`
-        });
+      const merged = existing ? Object.assign({}, existing.rowObj, payload) : payload;
+      const rowValues = mapObjectToRowByHeader_(merged, precheckShape.headers);
+      if (existing) {
+        precheckSheet.getRange(existing.rowIndex, 1, 1, rowValues.length).setValues([rowValues]);
+        updated += 1;
       } else {
-        manualReviewCount += 1;
-        const decisionReason = built.isProjectMappingRequired ? 'project_mapping_required' : 'manual_review_required';
-        const decisionNotes = built.isProjectMappingRequired
-          ? `project_mapping_required: project_id=${built.event.project_id || '<empty>'}; map transfer to a RESIDENTS project before approval; ${built.event.notes}`
-          : built.event.notes;
-        candidateDecisions.push({
-          event_id: built.event.event_id || buildMaymunEventId_(built.event),
-          decision_type: 'manual_review',
-          decision_status: 'pending_approval',
-          policy_version: 'mvp_selected_transfer_v1',
-          project_id: built.event.project_id,
-          resident_id: '',
-          amount: built.event.amount,
-          asset_code: built.event.asset_code,
-          requires_owner_go: 'TRUE',
-          owner_go_status: 'pending',
-          reason: decisionReason,
-          notes: decisionNotes
-        });
-        writeDebugLog({
-          run_id: runId,
-          module: 'maymun_asset_layer',
-          timestamp: stableNowIso_(),
-          stage: 'classify',
-          fundKey: SHEET_TRANSFERS,
-          details: `row=${item.row}; transfer_key=${item.transferKey}; class=manual_review; reason=${decisionReason}`
-        });
+        precheckSheet.getRange(precheckSheet.getLastRow() + 1, 1, 1, rowValues.length).setValues([rowValues]);
+        inserted += 1;
       }
+      upserted += 1;
+
+      writeDebugLog({
+        run_id: runId,
+        module: 'maymun_asset_layer',
+        timestamp: stableNowIso_(),
+        stage: 'precheck_candidate_upsert',
+        fundKey: SHEET_MAYMUN_PRECHECK_CANDIDATES,
+        details: `${existing ? 'update_existing' : 'insert_new'} transfer_key=${transferKey}; approval_status=${payload.approval_status}`
+      });
     }
 
-    const assetCodes = Object.keys(assetScopeMap).filter(function (v) { return !!v; });
-    const multiAssetDetected = assetCodes.length > 1;
-    if (multiAssetDetected) risks.push('multi-asset batch');
-
-    const expectedRunwayImpact = {};
-    for (let i = 0; i < assetCodes.length; i++) {
-      const code = assetCodes[i];
-      expectedRunwayImpact[code] = { expected_events: 0, expected_decisions: 0 };
-    }
-    for (let i = 0; i < candidateEvents.length; i++) {
-      const code = String(candidateEvents[i].asset_code || '').trim() || 'UNKNOWN';
-      if (!expectedRunwayImpact[code]) expectedRunwayImpact[code] = { expected_events: 0, expected_decisions: 0 };
-      expectedRunwayImpact[code].expected_events += 1;
-    }
-    for (let i = 0; i < candidateDecisions.length; i++) {
-      const code = String(candidateDecisions[i].asset_code || '').trim() || 'UNKNOWN';
-      if (!expectedRunwayImpact[code]) expectedRunwayImpact[code] = { expected_events: 0, expected_decisions: 0 };
-      expectedRunwayImpact[code].expected_decisions += 1;
-    }
-
-    const runStatus = candidateTransfers.length === 0 ? 'failed' : 'ready_for_review';
-    const finishedAt = stableNowIso_();
-    const assetScopeValue = multiAssetDetected ? 'MULTI' : (assetCodes[0] || 'UNKNOWN');
-    const uniqueRisks = Array.from(new Set(risks));
-
-    const runsSheetResult = ensureMaymunRunsSheet_();
-    const runsSheet = runsSheetResult.sheet;
-    const runsShape = getSheetByHeaderMap_(runsSheet);
     const runRecord = {
       run_id: runId,
-      run_type: 'precheck',
-      status: runStatus,
+      run_type: 'precheck_candidates_queue',
+      status: 'ready_for_review',
       started_at: startedAt,
-      finished_at: finishedAt,
-      candidate_count: candidateTransfers.length,
-      expected_events: candidateEvents.length,
-      expected_decisions: candidateDecisions.length,
+      finished_at: stableNowIso_(),
+      candidate_count: candidateCount,
+      expected_events: candidateCount,
+      expected_decisions: decisionRequiredCount,
       expected_allocations: 0,
-      expected_runway_impact_json: JSON.stringify(expectedRunwayImpact),
-      asset_scope: assetScopeValue,
+      expected_runway_impact_json: '{}',
+      asset_scope: 'MULTI',
       operator: Session.getActiveUser().getEmail() || 'manual_operator',
-      notes: uniqueRisks.join('; '),
+      notes: `precheck_candidates_upserted=${upserted}; inserted=${inserted}; updated=${updated}`,
       error: ''
     };
-    const runRow = mapObjectToRowByHeader_(runRecord, runsShape.headers);
-    runsSheet.getRange(runsSheet.getLastRow() + 1, 1, 1, runRow.length).setValues([runRow]);
-
-    writeDebugLog({
-      run_id: runId,
-      module: 'maymun_asset_layer',
-      timestamp: finishedAt,
-      stage: 'summarize',
-      fundKey: SHEET_MAYMUN_RUNS,
-      details: JSON.stringify({
-        candidate_count: candidateTransfers.length,
-        confirmed: confirmedCount,
-        manual_review: manualReviewCount,
-        ignored: ignoredRows.length,
-        asset_scope: assetScopeValue,
-        warnings: uniqueRisks
-      })
-    });
+    const runsShape = getSheetByHeaderMap_(runsSheet);
+    runsSheet.getRange(runsSheet.getLastRow() + 1, 1, 1, runsShape.headers.length).setValues([mapObjectToRowByHeader_(runRecord, runsShape.headers)]);
 
     const report = [
-      `RUN_ID: ${runId}`,
+      'PRECHECK candidates queued.',
       '',
-      `CANDIDATES: ${candidateTransfers.length}`,
-      `CONFIRMED: ${confirmedCount}`,
-      `MANUAL_REVIEW: ${manualReviewCount}`,
-      `IGNORED: ${ignoredRows.length}`,
-      '',
-      'EXPECTED:',
-      `MAYMUN_EVENTS +${candidateEvents.length}`,
-      `MAYMUN_DECISIONS +${candidateDecisions.length}`,
-      '',
-      'ASSET_SCOPE:',
-      assetScopeValue,
-      '',
-      'RISKS:',
-      uniqueRisks.length ? uniqueRisks.map(function (r) { return `- ${r}`; }).join('\n') : '- none',
-      '',
-      'NEXT ACTION:',
-      'Run:',
-      'MAYMUN: Write selected TRANSFER',
-      'или',
-      'обработать вручную decisions'
+      `Run ID: ${runId}`,
+      `Candidates found: ${candidateCount}`,
+      `Rows upserted: ${upserted}`,
+      `Inserted: ${inserted}`,
+      `Updated: ${updated}`,
+      `Expected decisions: ${decisionRequiredCount}`
     ].join('\n');
-
+    ui.alert(report);
     Logger.log(report);
-    if (candidateTransfers.length === 0) {
-      ui.alert('Nothing to process: all eligible TRANSFERS are already processed.');
-    } else {
-      ui.alert(report);
-    }
 
-    return {
-      runId: runId,
-      candidate_count: candidateTransfers.length,
-      expected_events: candidateEvents.length,
-      expected_decisions: candidateDecisions.length,
-      expected_manual_review_count: manualReviewCount,
-      asset_scope: assetScopeValue,
-      multi_asset_detected: multiAssetDetected,
-      warnings: uniqueRisks,
-      ignored_count: ignoredRows.length
-    };
+    return { runId: runId, candidate_count: candidateCount, upserted: upserted, inserted: inserted, updated: updated };
   } catch (e) {
     const finishedAt = stableNowIso_();
     const errorMessage = String(e && e.message ? e.message : e);
-    writeDebugLog({ run_id: runId, module: 'maymun_asset_layer', timestamp: finishedAt, stage: 'summarize', fundKey: 'ERROR', details: `precheck_failed: ${errorMessage}` });
+    writeDebugLog({ run_id: runId, module: 'maymun_asset_layer', timestamp: finishedAt, stage: 'precheck_candidate_upsert', fundKey: 'ERROR', details: `precheck_failed: ${errorMessage}` });
 
     try {
       const runsSheet = ensureMaymunRunsSheet_().sheet;
       const runsShape = getSheetByHeaderMap_(runsSheet);
       const failureRecord = {
         run_id: runId,
-        run_type: 'precheck',
+        run_type: 'precheck_candidates_queue',
         status: 'failed',
         started_at: startedAt,
         finished_at: finishedAt,
@@ -5726,14 +5775,208 @@ function runMaymunAssetLayerPrecheckUnprocessedTransfers() {
         notes: '',
         error: errorMessage
       };
-      const row = mapObjectToRowByHeader_(failureRecord, runsShape.headers);
-      runsSheet.getRange(runsSheet.getLastRow() + 1, 1, 1, row.length).setValues([row]);
+      runsSheet.getRange(runsSheet.getLastRow() + 1, 1, 1, runsShape.headers.length).setValues([mapObjectToRowByHeader_(failureRecord, runsShape.headers)]);
     } catch (inner) {
       Logger.log('Failed to persist MAYMUN_RUNS failure row: ' + String(inner));
     }
 
     ui.alert('Precheck failed: ' + errorMessage);
     throw e;
+  }
+}
+
+// Approved candidates processing (v1.0, 2026-04-25T15:35:00Z): processes up to 10 approved queue rows.
+function runMaymunAssetLayerProcessApprovedPrecheckCandidates() {
+  assertManualUiContext_();
+
+  const runId = newRunId_();
+  const now = stableNowIso_();
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const maxBatch = 10;
+
+  enterMaymunOwnerApprovedWriteContext_();
+  try {
+    const precheckSheet = ensureMaymunPrecheckCandidatesSheet_().sheet;
+    const shape = getSheetByHeaderMap_(precheckSheet);
+    if (precheckSheet.getLastRow() <= 1) {
+      ui.alert('No PRECHECK candidates found.');
+      return { runId: runId, processed: 0 };
+    }
+
+    const rows = precheckSheet.getRange(2, 1, precheckSheet.getLastRow() - 1, precheckSheet.getLastColumn()).getValues();
+    const approvedNew = [];
+    for (let i = 0; i < rows.length; i++) {
+      const rowObj = rowToObjectByHeaders_(rows[i], shape.headers);
+      const approvalStatus = String(rowObj.approval_status || '').trim().toLowerCase();
+      const processingStatus = String(rowObj.processing_status || '').trim().toLowerCase();
+      if (approvalStatus === 'approved' && processingStatus === 'new') {
+        approvedNew.push({ rowIndex: i + 2, rowObj: rowObj });
+      }
+    }
+
+    const batch = approvedNew.slice(0, maxBatch);
+    writeDebugLog({
+      run_id: runId,
+      module: 'maymun_asset_layer',
+      timestamp: now,
+      stage: 'process_approved_candidates_start',
+      fundKey: SHEET_MAYMUN_PRECHECK_CANDIDATES,
+      details: JSON.stringify({ approved_new_total: approvedNew.length, processing_batch: batch.length, batch_limit: maxBatch })
+    });
+
+    if (approvedNew.length > maxBatch) {
+      writeDebugLog({
+        run_id: runId,
+        module: 'maymun_asset_layer',
+        timestamp: now,
+        stage: 'process_approved_candidates_start',
+        fundKey: 'WARNING',
+        details: `approved queue exceeds batch limit (${approvedNew.length} > ${maxBatch}); only first ${maxBatch} will be processed`
+      });
+    }
+
+    const writeOpts = { dryRun: false, actor: 'precheck_candidates_manual_operator', runId: runId, __ownerApprovedWrite: true };
+    let processed = 0;
+    let eventsAppended = 0;
+    let decisionsInserted = 0;
+    let duplicatesSkipped = 0;
+    let failed = 0;
+
+    for (let i = 0; i < batch.length; i++) {
+      const item = batch[i];
+      const c = item.rowObj;
+      try {
+        writeDebugLog({
+          run_id: runId,
+          module: 'maymun_asset_layer',
+          timestamp: stableNowIso_(),
+          stage: 'process_candidate',
+          fundKey: SHEET_MAYMUN_PRECHECK_CANDIDATES,
+          details: `candidate_id=${c.candidate_id || ''}; transfer_key=${c.transfer_key || ''}`
+        });
+
+        const transferDataObj = {
+          tx_hash: c.tx_hash,
+          op_id: c.op_id,
+          amount: c.amount,
+          asset_code: c.asset_code,
+          direction: c.direction,
+          project_id: c.project_id,
+          fund_account_key: c.fund_account_key,
+          class: c.class,
+          datetime: c.datetime,
+          asset_issuer: c.asset_issuer,
+          from_label: c.from_label,
+          to_label: c.to_label,
+          memo: c.memo
+        };
+        const built = buildMaymunTransferEventCandidate_(transferDataObj, c.source_row || item.rowIndex, stableNowIso_(), runId);
+        const eventResult = appendMaymunEvent(built.event, writeOpts);
+
+        let decisionId = '';
+        let processingStatus = 'processed';
+        if (eventResult.action === 'duplicate_skipped') {
+          processingStatus = 'duplicate';
+          duplicatesSkipped += 1;
+          writeDebugLog({
+            run_id: runId,
+            module: 'maymun_asset_layer',
+            timestamp: stableNowIso_(),
+            stage: 'process_candidate_duplicate',
+            fundKey: SHEET_MAYMUN_EVENTS,
+            details: `candidate_id=${c.candidate_id || ''}; event_id=${eventResult.event_id || ''}`
+          });
+        } else {
+          eventsAppended += 1;
+          if (built.event.event_status === 'manual_review') {
+            const decisionReason = built.isProjectMappingRequired ? 'project_mapping_required' : 'manual_review_required';
+            const decisionNotes = built.isProjectMappingRequired
+              ? `project_mapping_required: project_id=${built.event.project_id || '<empty>'}; map transfer to a RESIDENTS project before approval; ${built.event.notes}`
+              : built.event.notes;
+            const decision = {
+              event_id: eventResult.event_id,
+              decision_type: 'manual_review',
+              decision_status: 'pending_approval',
+              policy_version: 'mvp_selected_transfer_v1',
+              project_id: built.event.project_id,
+              resident_id: '',
+              amount: built.event.amount,
+              asset_code: built.event.asset_code,
+              requires_owner_go: 'TRUE',
+              owner_go_status: 'pending',
+              reason: decisionReason,
+              notes: decisionNotes
+            };
+            const decisionResult = upsertMaymunDecision(decision, writeOpts);
+            decisionId = decisionResult.decision_id || '';
+            if (decisionResult.action === 'inserted') decisionsInserted += 1;
+          }
+        }
+
+        const updated = Object.assign({}, c, {
+          run_id: runId,
+          processing_status: processingStatus,
+          processed_at: stableNowIso_(),
+          result_event_id: eventResult.event_id || '',
+          result_decision_id: decisionId,
+          error: ''
+        });
+        precheckSheet.getRange(item.rowIndex, 1, 1, shape.headers.length).setValues([mapObjectToRowByHeader_(updated, shape.headers)]);
+        processed += 1;
+      } catch (candidateErr) {
+        failed += 1;
+        const errMsg = String(candidateErr && candidateErr.message ? candidateErr.message : candidateErr);
+        const failedRow = Object.assign({}, c, {
+          run_id: runId,
+          processing_status: 'failed',
+          processed_at: stableNowIso_(),
+          error: errMsg
+        });
+        precheckSheet.getRange(item.rowIndex, 1, 1, shape.headers.length).setValues([mapObjectToRowByHeader_(failedRow, shape.headers)]);
+        writeDebugLog({
+          run_id: runId,
+          module: 'maymun_asset_layer',
+          timestamp: stableNowIso_(),
+          stage: 'process_candidate_failed',
+          fundKey: SHEET_MAYMUN_PRECHECK_CANDIDATES,
+          details: `candidate_id=${c.candidate_id || ''}; error=${errMsg}`
+        });
+      }
+    }
+
+    writeDebugLog({
+      run_id: runId,
+      module: 'maymun_asset_layer',
+      timestamp: stableNowIso_(),
+      stage: 'process_approved_candidates_complete',
+      fundKey: SHEET_MAYMUN_PRECHECK_CANDIDATES,
+      details: JSON.stringify({ processed: processed, events_appended: eventsAppended, decisions_inserted: decisionsInserted, duplicates_skipped: duplicatesSkipped, failed: failed })
+    });
+
+    const alertMsg = [
+      'Processed approved PRECHECK candidates.',
+      '',
+      `Run ID: ${runId}`,
+      `Processed: ${processed}`,
+      `Events appended: ${eventsAppended}`,
+      `Decisions inserted: ${decisionsInserted}`,
+      `Duplicates skipped: ${duplicatesSkipped}`,
+      `Failed: ${failed}`
+    ].join('\n');
+    ui.alert(alertMsg);
+    Logger.log(alertMsg);
+
+    return {
+      runId: runId,
+      processed: processed,
+      events_appended: eventsAppended,
+      decisions_inserted: decisionsInserted,
+      duplicates_skipped: duplicatesSkipped,
+      failed: failed
+    };
+  } finally {
+    exitMaymunOwnerApprovedWriteContext_();
   }
 }
 

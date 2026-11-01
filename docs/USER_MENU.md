@@ -224,12 +224,19 @@
 - Duplicate blocker: повторный запуск блокируется при совпадении `asset_code` + нормализованного набора `source_allocation_ids`; пишется `DEBUG_LOG` stage `runway_snapshot.duplicate_blocked` и оператор получает alert.
 - Legacy alias fields в новой строке заполняются автоматически: `snapshot_date`, `confirmed_liquidity`, `pending_liquidity=0`, `liquidatable_assets_value`, `status=manual_snapshot`, `comment`; поля burn/model (`monthly_burn`, `runway_days`, `self_sufficiency_ratio`) остаются пустыми в MVP.
 
-35. **MAYMUN: Precheck unprocessed TRANSFERS** → [`runMaymunAssetLayerPrecheckUnprocessedTransfers()`](clasp/Резиденты%20Мабиз.js) (v1.0, 2026-04-25)
-- Что делает: в полуавтоматическом режиме сканирует `TRANSFERS`, находит необработанные строки (`tx_hash + op_id`, отсутствующие в `MAYMUN_EVENTS.transfer_key`), применяет dry-run классификацию и формирует отчёт без записи в `MAYMUN_*` бизнес-слои.
-- Что пишет: только служебные слои `MAYMUN_RUNS` и `DEBUG_LOG` (`stage: scan / classify / summarize`).
-- Классы кандидатов: `confirmed_candidate`, `manual_review`, `ignored`; для `manual_review` рассчитывается ожидаемое создание decision (`pending_approval`).
-- Вывод оператору: `Logger.log` + `SpreadsheetApp.getUi().alert()` с блоками `CANDIDATES`, `EXPECTED`, `ASSET_SCOPE`, `RISKS`, `NEXT ACTION`.
+35. **MAYMUN: Precheck unprocessed TRANSFERS** → [`runMaymunAssetLayerPrecheckUnprocessedTransfers()`](clasp/Резиденты%20Мабиз.js) (v1.1, 2026-04-25)
+- Что делает: сканирует необработанные `TRANSFERS` и делает post-row upsert в `MAYMUN_PRECHECK_CANDIDATES` по `transfer_key = tx_hash + ':' + op_id`.
+- Что пишет: `MAYMUN_PRECHECK_CANDIDATES`, `MAYMUN_RUNS`, `DEBUG_LOG` (stage: `precheck_candidates_scan`, `precheck_candidate_upsert`).
+- Dedup: дубли в очереди не создаются; при повторном precheck обновляются только precheck-поля, `approval_status` сохраняется, если уже `approved`/`rejected`/`hold`.
+- Что не делает: не пишет в `MAYMUN_EVENTS`, `MAYMUN_DECISIONS`, `MAYMUN_ALLOCATIONS`, `MAYMUN_EXPENSES`, `MAYMUN_RUNWAY`.
 - Ограничения: только ручной запуск из UI, без cron/triggers/live projection, без `clasp run`, без изменения runtime/credentials/providers.
+
+36. **MAYMUN: Process approved PRECHECK candidates** → [`runMaymunAssetLayerProcessApprovedPrecheckCandidates()`](clasp/Резиденты%20Мабиз.js) (v1.0, 2026-04-25)
+- Что делает: обрабатывает только строки `MAYMUN_PRECHECK_CANDIDATES` с `approval_status=approved` и `processing_status=new`.
+- Batch limit: максимум 10 кандидатов за запуск; если строк больше — обрабатываются первые 10 и пишется warning в `DEBUG_LOG`.
+- Для каждой строки: создаёт `MAYMUN_EVENT` по тем же правилам, что selected-transfer flow; для `manual_review` создаёт `MAYMUN_DECISION`.
+- Обратная запись в очередь: `processing_status`, `processed_at`, `result_event_id`, `result_decision_id`, `error`.
+- DEBUG stages: `process_approved_candidates_start`, `process_candidate`, `process_candidate_duplicate`, `process_candidate_failed`, `process_approved_candidates_complete`.
 
 ## Рекомендуемый порядок запуска для новой таблицы
 

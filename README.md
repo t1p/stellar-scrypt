@@ -119,19 +119,31 @@ Owner-approved write profile делает:
 
 Rollback и пошаговый безопасный запуск описаны в [`docs/MAYMUN_OWNER_MANUAL_RUNBOOK.md`](docs/MAYMUN_OWNER_MANUAL_RUNBOOK.md).
 
-### Полуавтоматический режим (precheck)
+### ASSET-MVP-005 — Очередь кандидатов precheck с ручным approve
 
-Доступен отдельный ручной пункт меню: `MAYMUN: Precheck unprocessed TRANSFERS` (`runMaymunAssetLayerPrecheckUnprocessedTransfers()`).
+Добавлен служебный лист `MAYMUN_PRECHECK_CANDIDATES` для ручной очереди кандидатов до бизнес-записи в `MAYMUN_EVENTS`/`MAYMUN_DECISIONS`.
 
-Что делает режим:
+Доступны два ручных пункта меню:
 
-- система находит необработанные строки `TRANSFERS` по критерию отсутствия `tx_hash + op_id` в `MAYMUN_EVENTS.transfer_key`;
-- применяет те же dry-run правила классификации, что и для `MAYMUN: Write selected TRANSFER`;
-- считает ожидаемые эффекты (`expected_events`, `expected_decisions`, `asset_scope`, warnings/risk list);
-- формирует отчёт для оператора (`Logger.log` + UI alert);
-- пишет только служебные слои: `MAYMUN_RUNS` и `DEBUG_LOG`.
+- `MAYMUN: Precheck unprocessed TRANSFERS` (`runMaymunAssetLayerPrecheckUnprocessedTransfers()`).
+- `MAYMUN: Process approved PRECHECK candidates` (`runMaymunAssetLayerProcessApprovedPrecheckCandidates()`).
 
-Важно: полуавтоматический precheck **не** выполняет бизнес-запись в `MAYMUN_EVENTS`, `MAYMUN_DECISIONS`, `MAYMUN_ALLOCATIONS`, `MAYMUN_EXPENSES`, `MAYMUN_RUNWAY`.
+Что делает precheck:
+
+- сканирует необработанные `TRANSFERS` (по дедуп-ключу `transfer_key = tx_hash + ':' + op_id`);
+- делает upsert строк в `MAYMUN_PRECHECK_CANDIDATES` (без дублей);
+- сохраняет текущий `approval_status`, если он уже `approved` / `rejected` / `hold`;
+- пишет служебные записи в `MAYMUN_RUNS` и `DEBUG_LOG` (`precheck_candidates_scan`, `precheck_candidate_upsert`).
+
+Что делает обработка approved-кандидатов:
+
+- берёт только `approval_status=approved` и `processing_status=new`;
+- обрабатывает максимум 10 строк за запуск;
+- создаёт `MAYMUN_EVENT` по тем же правилам, что и `runMaymunAssetLayerWriteSelectedTransfer()`;
+- при `manual_review` создаёт `MAYMUN_DECISION`;
+- пишет результат в строку кандидата: `processing_status`, `processed_at`, `result_event_id`, `result_decision_id`, `error`.
+
+Важно: precheck-этап не пишет в бизнес-листы `MAYMUN_EVENTS`, `MAYMUN_DECISIONS`, `MAYMUN_ALLOCATIONS`, `MAYMUN_EXPENSES`, `MAYMUN_RUNWAY`.
 
 ### Ручной сценарий после фиксации TRANSFER
 
